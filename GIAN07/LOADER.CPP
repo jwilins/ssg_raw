@@ -197,7 +197,36 @@ bool LoadMIDIWithPotentialLoop(BYTE_BUFFER_OWNED buf, const HASH& hash)
 }
 // ---------------------------------------------------
 
+// Retrieving file path of requested asset index/type //
+std::u8string GetFilePath(fil_no_t filno,
+	std::u8string_view subdir,
+	std::u8string_view file_ext)
+{
+	auto data_path = PathForData();
+	std::string filno_str = std::to_string(filno);
+	std::u8string_view filno_u8str(reinterpret_cast<const char8_t*>(filno_str.data()),
+	filno_str.size());
+
+	const auto cap = (
+		data_path.size() + subdir.size() + filno_u8str.size() + file_ext.size()
+	);
+	std::u8string file_path;
+	file_path.resize_and_overwrite(
+		cap, [&](char8_t* buf, size_t) {
+			std::ranges::in_out_result p = { data_path.begin(), buf };
+			p = std::ranges::copy(data_path, p.out);
+			p = std::ranges::copy(subdir, p.out);
+			p = std::ranges::copy(filno_u8str, p.out);
+			p = std::ranges::copy(file_ext, p.out);
+			return (p.out - buf);
+		}
+	);
+
+	return file_path;
+}
+
 // Packfile loading //
+/*
 bool GrpBMPLoadP(const PACKFILE_READ& in, fil_no_t filno, SURFACE_ID sid)
 {
 	auto maybe_bmp = BMPLoad(in.MemExpand(filno));
@@ -215,17 +244,51 @@ bool GrpBMPLoadP(const PACKFILE_READ& in, fil_no_t filno, SURFACE_ID sid)
 	auto& bmp = maybe_bmp.value();
 	return GrpSurface_Load(sid, std::move(bmp));
 }
+*/
 
+// Raw BMP loading //
+bool GrpBMPLoadP(const PACKFILE_READ& in,
+	fil_no_t filno,
+	SURFACE_ID sid,
+	bool ending = false)
+{
+	const std::u8string_view subdir = (!ending) ? u8"graph\\" : u8"graph2\\";
+	std::u8string bmp_file_path = GetFilePath(filno, subdir, u8".BMP");
+
+	auto maybe_bmp = BMPLoad(FileLoad(bmp_file_path.c_str()));
+
+	// If this fails, we're going to crash due to the uninitialized surface
+	// anyway. Might as well announce it in debug mode.
+	assert(maybe_bmp);
+
+	// Still necessary to avoid generation of exception handling code in
+	// Release mode.
+	if(!maybe_bmp) {
+		return false;
+	}
+
+	auto& bmp = maybe_bmp.value();
+	return GrpSurface_Load(sid, std::move(bmp));
+}
+
+/*
 bool Snd_SELoadP(const PACKFILE_READ& in, fil_no_t filno, uint8_t id, int max)
 {
 	return Snd_SELoad(in.MemExpand(filno), id, max);
+}
+*/
+
+// Raw sound effect loading //
+bool Snd_SELoadP(const PACKFILE_READ& in, fil_no_t filno, uint8_t id, int max)
+{
+	std::u8string sound_file_path = GetFilePath(filno, u8"sound\\", u8".WAV");
+	return Snd_SELoad(FileLoad(sound_file_path.c_str()), id, max);
 }
 
 bool LoadSound(const PACKFILE_READ& in);
 
 // Packfile cache //
 // -------------- //
-
 namespace DAT {
 	enum class PACK_ID : uint8_t {
 		ENEMY,
@@ -554,11 +617,11 @@ bool LoadGraph(int stage)
 	if(stage==GRAPH_ID_ENDING){
 		const auto& in = DAT::Packfile(DAT::PACK_ID::GRAPH2);
 
-		if(!GrpBMPLoadP(in, 0, SURFACE_ID::ENDING_CREDITS)) {
+		if(!GrpBMPLoadP(in, 0, SURFACE_ID::ENDING_CREDITS, true)) {
 			return false;
 		}
 		for(auto i = 0; i < ENDING_PIC_MAX; i++) {
-			if(!GrpBMPLoadP(in, (1 + i), (SURFACE_ID::ENDING_PIC + i))) {
+			if(!GrpBMPLoadP(in, (1 + i), (SURFACE_ID::ENDING_PIC + i), true)) {
 				return false;
 			}
 			GrpBackend_PaletteGet(EndingGrp[i].pal);
@@ -677,6 +740,7 @@ bool LoadStageData(uint8_t stage)
 	// エキストラステージシステム用 //
 	if(stage == GRAPH_ID_EXSTAGE){
 		// ECL Load
+		/*
 		if((ECL_Head = enemy.MemExpand(24)) == nullptr) {
 			return false;
 		}
@@ -690,10 +754,41 @@ bool LoadStageData(uint8_t stage)
 		if((ScrollInfo.DataHead = enemy.MemExpand(26)) == nullptr) {
 			return false;
 		}
+		*/
+
+		// Raw ECL Load
+		if((ECL_Head = 
+			FileLoad(GetFilePath(24, u8"enemy\\", u8".ECL").c_str())) 
+			== nullptr) {
+			return false;
+		}
+
+		// Raw SCL Load
+		if((SCL_Head = 
+			FileLoad(GetFilePath(25, u8"enemy\\", u8".SCL").c_str())) 
+			== nullptr) {
+			return false;
+		}
+
+		// Raw MapData Load
+		if((ScrollInfo.DataHead = 
+			FileLoad(GetFilePath(26, u8"enemy\\", u8".MAP").c_str())) 
+			== nullptr) {
+			return false;
+		}
 	}
 	else if(stage == GRAPH_ID_ENDING){
 		// SCL Load
+		/*
 		if((SCL_Head = enemy.MemExpand(47)) == nullptr) {
+			return false;
+		}
+		*/
+
+		// Raw SCL Load
+		if((SCL_Head = 
+			FileLoad(GetFilePath(47, u8"enemy\\", u8".SCL").c_str())) 
+			== nullptr) {
 			return false;
 		}
 		SCL_Now   = SCL_Head.get();
@@ -706,6 +801,7 @@ bool LoadStageData(uint8_t stage)
 			return false;
 		}
 
+		/*
 		// ECL Load
 		if((ECL_Head = enemy.MemExpand(stage + 0 - 1)) == nullptr) {
 			return false;
@@ -718,6 +814,28 @@ bool LoadStageData(uint8_t stage)
 
 		// MapData Load
 		if((ScrollInfo.DataHead = enemy.MemExpand(stage + 12 - 1)) == nullptr) {
+			return false;
+		}
+		*/
+
+		// Raw ECL Load
+		if((ECL_Head = 
+			FileLoad(GetFilePath(stage + 0 - 1, u8"enemy\\", u8".ECL").c_str())) 
+			== nullptr) {
+			return false;
+		}
+
+		// Raw SCL Load
+		if((SCL_Head = 
+			FileLoad(GetFilePath(stage + 6 - 1, u8"enemy\\", u8".SCL").c_str())) 
+			== nullptr) {
+			return false;
+		}
+
+		// Raw MapData Load
+		if((ScrollInfo.DataHead = 
+			FileLoad(GetFilePath(stage + 12 - 1, u8"enemy\\", u8".MAP").c_str())) 
+			== nullptr) {
 			return false;
 		}
 	}
@@ -1266,11 +1384,15 @@ bool LoadMusicRoomComment(int no)
 		return false;
 	}
 	const auto& text = MusicRoomText.value();
-	const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
-	return text.PrerenderTitleAndComment(enemy.MemExpand(27 + no), no);
+	//const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
+	//return text.PrerenderTitleAndComment(enemy.MemExpand(27 + no), no);
+	std::u8string comment_file_path = GetFilePath(27 + no, u8"enemy\\", u8".MUS");
+	return text.PrerenderTitleAndComment(FileLoad(comment_file_path.c_str()), no);
 }
 
 BYTE_BUFFER_OWNED LoadDemo(int stage)
 {
-	return DAT::Packfile(DAT::PACK_ID::ENEMY).MemExpand(stage - 1 + 18);
+	//return DAT::Packfile(DAT::PACK_ID::ENEMY).MemExpand(stage - 1 + 18);
+	std::u8string demo_file_path = GetFilePath(stage - 1 + 18, u8"enemy\\", u8".DEM");
+	return FileLoad(demo_file_path.c_str());
 }
