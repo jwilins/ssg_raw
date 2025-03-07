@@ -1,6 +1,6 @@
 # 秋霜玉 (Raw Asset Loading)
 
-This fork of nmlgc's Shuusou Gyoku (Seihou 1) source code allows for loading of assets directly from raw files rather than from packed DAT archives. This allows for easy modding of game stage scripts/dialogue, images, etc. Enemy scripts (ECL) and stage scripts/dialogue (SCL) can be modified with the help of tools such as [SSGtk](https://github.com/Clb184/SSGtk).
+This fork of nmlgc's revised Shuusou Gyoku (Seihou 1) source code allows for loading of assets directly from raw files rather than from packed DAT archives. This allows for easy modding of game stage scripts/dialogue, images, etc. Enemy scripts (ECL) and stage scripts/dialogue (SCL) can be modified with the help of tools such as [SSGtk](https://github.com/Clb184/SSGtk).
 
 Instructions for extracting assets so that they can be read by this build:
 1. Download and place rename.bat into your Shuusou Gyoku directory
@@ -9,7 +9,7 @@ Instructions for extracting assets so that they can be read by this build:
 4. Open each DAT file you created a folder for (ENEMY.DAT, GRAPH.DAT, GRAPH2.DAT, and SOUND.DAT) in Brightmoon, select all of the DATAxxxx files, and extract them into the folder you created with the corresponding name of the DAT
 5. Run the rename.bat file that was extracted into the Shuusou Gyoku directory to rename all files in order to be read properly by the build
 6. Renaming is done; feel free to remove rename.bat
-7. The game is now ready to be played with the extracted assets! Download and launch the executable of choice in your Shuusou Gyoku directory: GIAN07.exe for the updated SDL graphics engine (better for newer systems) or GIAN07D7.exe for the original DirectX 7 graphics engine (better for older systems).
+7. The game is now ready to be played with the extracted assets! Download and launch the executable of choice in your Shuusou Gyoku directory: GIAN07.exe and SDL2.dll for the updated SDL graphics engine (better for newer systems) or just GIAN07D7.exe for the original DirectX 7 graphics engine (better for older systems).
 
 Custom music can be added through BGM packs as the nmlgc build already supports.
 
