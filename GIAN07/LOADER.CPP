@@ -204,8 +204,8 @@ std::u8string GetFilePath(fil_no_t filno,
 {
 	auto data_path = PathForData();
 	std::string filno_str = std::to_string(filno);
-	std::u8string_view filno_u8str(reinterpret_cast<const char8_t*>(filno_str.data()),
-	filno_str.size());
+	std::u8string_view filno_u8str(reinterpret_cast<const char8_t*>
+	(filno_str.data()), filno_str.size());
 
 	const auto cap = (
 		data_path.size() + subdir.size() + filno_u8str.size() + file_ext.size()
@@ -225,32 +225,8 @@ std::u8string GetFilePath(fil_no_t filno,
 	return file_path;
 }
 
-// Packfile loading //
-/*
-bool GrpBMPLoadP(const PACKFILE_READ& in, fil_no_t filno, SURFACE_ID sid)
-{
-	auto maybe_bmp = BMPLoad(in.MemExpand(filno));
-
-	// If this fails, we're going to crash due to the uninitialized surface
-	// anyway. Might as well announce it in debug mode.
-	assert(maybe_bmp);
-
-	// Still necessary to avoid generation of exception handling code in
-	// Release mode.
-	if(!maybe_bmp) {
-		return false;
-	}
-
-	auto& bmp = maybe_bmp.value();
-	return GrpSurface_Load(sid, std::move(bmp));
-}
-*/
-
 // Raw BMP loading //
-bool GrpBMPLoadP(const PACKFILE_READ& in,
-	fil_no_t filno,
-	SURFACE_ID sid,
-	bool ending = false)
+bool GrpBMPLoadP(fil_no_t filno, SURFACE_ID sid, bool ending = false)
 {
 	const std::u8string_view subdir = (!ending) ? u8"graph\\" : u8"graph2\\";
 	std::u8string bmp_file_path = GetFilePath(filno, subdir, u8".BMP");
@@ -271,21 +247,14 @@ bool GrpBMPLoadP(const PACKFILE_READ& in,
 	return GrpSurface_Load(sid, std::move(bmp));
 }
 
-/*
-bool Snd_SELoadP(const PACKFILE_READ& in, fil_no_t filno, uint8_t id, int max)
-{
-	return Snd_SELoad(in.MemExpand(filno), id, max);
-}
-*/
-
 // Raw sound effect loading //
-bool Snd_SELoadP(const PACKFILE_READ& in, fil_no_t filno, uint8_t id, int max)
+bool Snd_SELoadP(fil_no_t filno, uint8_t id, int max)
 {
 	std::u8string sound_file_path = GetFilePath(filno, u8"sound\\", u8".WAV");
 	return Snd_SELoad(FileLoad(sound_file_path.c_str()), id, max);
 }
 
-bool LoadSound(const PACKFILE_READ& in);
+bool LoadSound();
 
 // Packfile cache //
 // -------------- //
@@ -417,7 +386,7 @@ namespace DAT {
 			if(id == PACK_ID::MUSIC) {
 				LoadMusicHashes(in, st);
 			} else if(id == PACK_ID::SOUND) {
-				LoadSound(in);
+				LoadSound();
 			}
 			pack = std::move(in);
 		});
@@ -577,33 +546,33 @@ bool LoadGraph(int stage)
 {
 //	bIsBombPalette = FALSE;
 	LoadedStage = stage;
-	const auto& graph = DAT::Packfile(DAT::PACK_ID::GRAPH);
+	//const auto& graph = DAT::Packfile(DAT::PACK_ID::GRAPH);
 
 	// 音楽室用 //
 	if(stage==GRAPH_ID_MUSICROOM){
 		return (
-			GrpBMPLoadP(graph, 0, SURFACE_ID::SYSTEM) &&
-			GrpBMPLoadP(graph, (19 + 4), SURFACE_ID::MUSIC)
+			GrpBMPLoadP(0, SURFACE_ID::SYSTEM) &&
+			GrpBMPLoadP((19 + 4), SURFACE_ID::MUSIC)
 		);
 	}
 	// タイトル画面用 //
 	if(stage==GRAPH_ID_TITLE){
 		return (
-			GrpBMPLoadP(graph, 0, SURFACE_ID::SYSTEM) &&
-			GrpBMPLoadP(graph, (20 + 4), SURFACE_ID::TITLE)
+			GrpBMPLoadP(0, SURFACE_ID::SYSTEM) &&
+			GrpBMPLoadP((20 + 4), SURFACE_ID::TITLE)
 		);
 		// LoadPaletteFrom(SURFACE_ID::ENEMY);
 	}
 	// お名前登録画面用 //
 	if(stage==GRAPH_ID_NAMEREGIST){
 		return (
-			GrpBMPLoadP(graph, 0, SURFACE_ID::SYSTEM) &&
-			GrpBMPLoadP(graph, (21 + 4), SURFACE_ID::NAMEREG)
+			GrpBMPLoadP(0, SURFACE_ID::SYSTEM) &&
+			GrpBMPLoadP((21 + 4), SURFACE_ID::NAMEREG)
 		);
 	}
 	// 西方Ｐｒｏｊｅｃｔ表示用 //
 	if(stage==GRAPH_ID_SPROJECT){
-		if(!GrpBMPLoadP(graph, 31, SURFACE_ID::SPROJECT)) {
+		if(!GrpBMPLoadP(31, SURFACE_ID::SPROJECT)) {
 			return false;
 		}
 		GrpBackend_PaletteGet(SProjectPalette);
@@ -617,11 +586,11 @@ bool LoadGraph(int stage)
 	if(stage==GRAPH_ID_ENDING){
 		const auto& in = DAT::Packfile(DAT::PACK_ID::GRAPH2);
 
-		if(!GrpBMPLoadP(in, 0, SURFACE_ID::ENDING_CREDITS, true)) {
+		if(!GrpBMPLoadP(0, SURFACE_ID::ENDING_CREDITS, true)) {
 			return false;
 		}
 		for(auto i = 0; i < ENDING_PIC_MAX; i++) {
-			if(!GrpBMPLoadP(in, (1 + i), (SURFACE_ID::ENDING_PIC + i), true)) {
+			if(!GrpBMPLoadP((1 + i), (SURFACE_ID::ENDING_PIC + i), true)) {
 				return false;
 			}
 			GrpBackend_PaletteGet(EndingGrp[i].pal);
@@ -632,20 +601,20 @@ bool LoadGraph(int stage)
 
 	// エキストラステージシステム用 //
 	if(stage == GRAPH_ID_EXSTAGE){
-		if(!GrpBMPLoadP(graph, 0, SURFACE_ID::SYSTEM)) {
+		if(!GrpBMPLoadP(0, SURFACE_ID::SYSTEM)) {
 			return false;
 		}
-		if(!GrpBMPLoadP(graph, (27 + 1), SURFACE_ID::ENEMY)) {
+		if(!GrpBMPLoadP((27 + 1), SURFACE_ID::ENEMY)) {
 			return false;
 		}
 		GrpBackend_PaletteGet(EnemyPalette);
 
-		if(!GrpBMPLoadP(graph, 27, SURFACE_ID::MAPCHIP)) {
+		if(!GrpBMPLoadP(27, SURFACE_ID::MAPCHIP)) {
 			return false;
 		}
 
 		// 諸事情により、ここにいるのです //
-		if(!GrpBMPLoadP(graph, 26, SURFACE_ID::BOMBER)) {
+		if(!GrpBMPLoadP(26, SURFACE_ID::BOMBER)) {
 			return false;
 		}
 
@@ -654,7 +623,7 @@ bool LoadGraph(int stage)
 
 	// エキストラステージボス用(1) //
 	if(stage == GRAPH_ID_EXBOSS1){
-		if(!GrpBMPLoadP(graph, 29, SURFACE_ID::ENEMY)) {
+		if(!GrpBMPLoadP(29, SURFACE_ID::ENEMY)) {
 			return false;
 		}
 		GrpBackend_PaletteGet(EnemyPalette);
@@ -663,7 +632,7 @@ bool LoadGraph(int stage)
 
 	// エキストラステージボス用(2) //
 	if(stage == GRAPH_ID_EXBOSS2){
-		if(!GrpBMPLoadP(graph, 30, SURFACE_ID::ENEMY)) {
+		if(!GrpBMPLoadP(30, SURFACE_ID::ENEMY)) {
 			return false;
 		}
 		GrpBackend_PaletteGet(EnemyPalette);
@@ -675,10 +644,10 @@ bool LoadGraph(int stage)
 	}
 
 	// マップチップのロードは後で変換すること //
-	if(!GrpBMPLoadP(graph, 0, SURFACE_ID::SYSTEM)) {
+	if(!GrpBMPLoadP(0, SURFACE_ID::SYSTEM)) {
 		return false;
 	}
-	if(!GrpBMPLoadP(graph, (stage + 0), SURFACE_ID::ENEMY)) {
+	if(!GrpBMPLoadP((stage + 0), SURFACE_ID::ENEMY)) {
 		return false;
 	}
 	GrpBackend_PaletteGet(EnemyPalette);
@@ -686,12 +655,12 @@ bool LoadGraph(int stage)
 	// 本当は STAGE_MAX とすべき
 	// const fil_no_t MapChipID[STAGE_MAX] = { 7, 7, 8, 9, 10, 11 };
 	const fil_no_t MapChipID[STAGE_MAX] = { 7, 8, 9, 10, 11, 12 };
-	if(!GrpBMPLoadP(graph, MapChipID[stage - 1], SURFACE_ID::MAPCHIP)) {
+	if(!GrpBMPLoadP(MapChipID[stage - 1], SURFACE_ID::MAPCHIP)) {
 		return false;
 	}
 
 	// 諸事情により、ここにいるのです //
-	return GrpBMPLoadP(graph, 26, SURFACE_ID::BOMBER);
+	return GrpBMPLoadP(26, SURFACE_ID::BOMBER);
 }
 
 void ReloadGraph(void)
@@ -705,8 +674,8 @@ bool LoadFace(uint8_t FaceID, uint8_t FileNo)
 	if(FaceID >= FACE_MAX) {
 		return false;
 	}
-	const auto& graph = DAT::Packfile(DAT::PACK_ID::GRAPH);
-	if(!GrpBMPLoadP(graph, (13 + FileNo), (SURFACE_ID::FACE + FaceID))) {
+	//const auto& graph = DAT::Packfile(DAT::PACK_ID::GRAPH);
+	if(!GrpBMPLoadP((13 + FileNo), (SURFACE_ID::FACE + FaceID))) {
 		return false;
 	}
 
@@ -735,27 +704,10 @@ bool LoadStageData(uint8_t stage)
 	SCL_Head = nullptr;
 	ScrollInfo.DataHead = nullptr;
 
-	const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
+	//const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
 
 	// エキストラステージシステム用 //
 	if(stage == GRAPH_ID_EXSTAGE){
-		// ECL Load
-		/*
-		if((ECL_Head = enemy.MemExpand(24)) == nullptr) {
-			return false;
-		}
-
-		// SCL Load
-		if((SCL_Head = enemy.MemExpand(25)) == nullptr) {
-			return false;
-		}
-
-		// MapData Load
-		if((ScrollInfo.DataHead = enemy.MemExpand(26)) == nullptr) {
-			return false;
-		}
-		*/
-
 		// Raw ECL Load
 		if((ECL_Head = 
 			FileLoad(GetFilePath(24, u8"enemy\\", u8".ECL").c_str())) 
@@ -778,13 +730,6 @@ bool LoadStageData(uint8_t stage)
 		}
 	}
 	else if(stage == GRAPH_ID_ENDING){
-		// SCL Load
-		/*
-		if((SCL_Head = enemy.MemExpand(47)) == nullptr) {
-			return false;
-		}
-		*/
-
 		// Raw SCL Load
 		if((SCL_Head = 
 			FileLoad(GetFilePath(47, u8"enemy\\", u8".SCL").c_str())) 
@@ -800,23 +745,6 @@ bool LoadStageData(uint8_t stage)
 		if((stage < 1) || (stage > STAGE_MAX)) {
 			return false;
 		}
-
-		/*
-		// ECL Load
-		if((ECL_Head = enemy.MemExpand(stage + 0 - 1)) == nullptr) {
-			return false;
-		}
-
-		// SCL Load
-		if((SCL_Head = enemy.MemExpand(stage + 6 - 1)) == nullptr) {
-			return false;
-		}
-
-		// MapData Load
-		if((ScrollInfo.DataHead = enemy.MemExpand(stage + 12 - 1)) == nullptr) {
-			return false;
-		}
-		*/
 
 		// Raw ECL Load
 		if((ECL_Head = 
@@ -1327,7 +1255,7 @@ bool LoadMIDIBuffer(BYTE_BUFFER_OWNED buf)
 }
 
 // 全てのSoundデータをロードする //
-bool LoadSound(const PACKFILE_READ& in)
+bool LoadSound()
 {
 	// サウンドの初期化 //
 	// 何らかの理由で使用できなければ、Disable とする //
@@ -1337,26 +1265,26 @@ bool LoadSound(const PACKFILE_READ& in)
 	}
 
 	while(1){
-		if(!Snd_SELoadP(in,SOUND_ID_KEBARI  ,SOUND_ID_KEBARI  ,SNDMAX_KEBARI  )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_TAME    ,SOUND_ID_TAME    ,SNDMAX_TAME    )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_LASER   ,SOUND_ID_LASER   ,SNDMAX_LASER   )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_LASER2  ,SOUND_ID_LASER2  ,SNDMAX_LASER2  )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_BOMB    ,SOUND_ID_BOMB    ,SNDMAX_BOMB    )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_SELECT  ,SOUND_ID_SELECT  ,SNDMAX_SELECT  )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_HIT     ,SOUND_ID_HIT     ,SNDMAX_HIT     )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_CANCEL  ,SOUND_ID_CANCEL  ,SNDMAX_CANCEL  )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_WARNING ,SOUND_ID_WARNING ,SNDMAX_WARNING )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_SBLASER ,SOUND_ID_SBLASER ,SNDMAX_SBLASER )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_BUZZ    ,SOUND_ID_BUZZ    ,SNDMAX_BUZZ))     break;
-		if(!Snd_SELoadP(in,SOUND_ID_MISSILE ,SOUND_ID_MISSILE ,SNDMAX_MISSILE )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_JOINT   ,SOUND_ID_JOINT   ,SNDMAX_JOINT   )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_DEAD    ,SOUND_ID_DEAD    ,SNDMAX_DEAD    )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_SBBOMB  ,SOUND_ID_SBBOMB  ,SNDMAX_SBBOMB  )) break;
-		if(!Snd_SELoadP(in,SOUND_ID_BOSSBOMB,SOUND_ID_BOSSBOMB,SNDMAX_BOSSBOMB)) break;
-		if(!Snd_SELoadP(in,SOUND_ID_ENEMYSHOT,SOUND_ID_ENEMYSHOT,SNDMAX_ENEMYSHOT)) break;
-		if(!Snd_SELoadP(in,SOUND_ID_HLASER, SOUND_ID_HLASER, SNDMAX_HLASER))	break;
-		if(!Snd_SELoadP(in,SOUND_ID_TAMEFAST, SOUND_ID_TAMEFAST, SNDMAX_TAMEFAST))	break;
-		if(!Snd_SELoadP(in,SOUND_ID_WARP, SOUND_ID_WARP, SNDMAX_WARP))	break;
+		if(!Snd_SELoadP(SOUND_ID_KEBARI  ,SOUND_ID_KEBARI  ,SNDMAX_KEBARI  )) break;
+		if(!Snd_SELoadP(SOUND_ID_TAME    ,SOUND_ID_TAME    ,SNDMAX_TAME    )) break;
+		if(!Snd_SELoadP(SOUND_ID_LASER   ,SOUND_ID_LASER   ,SNDMAX_LASER   )) break;
+		if(!Snd_SELoadP(SOUND_ID_LASER2  ,SOUND_ID_LASER2  ,SNDMAX_LASER2  )) break;
+		if(!Snd_SELoadP(SOUND_ID_BOMB    ,SOUND_ID_BOMB    ,SNDMAX_BOMB    )) break;
+		if(!Snd_SELoadP(SOUND_ID_SELECT  ,SOUND_ID_SELECT  ,SNDMAX_SELECT  )) break;
+		if(!Snd_SELoadP(SOUND_ID_HIT     ,SOUND_ID_HIT     ,SNDMAX_HIT     )) break;
+		if(!Snd_SELoadP(SOUND_ID_CANCEL  ,SOUND_ID_CANCEL  ,SNDMAX_CANCEL  )) break;
+		if(!Snd_SELoadP(SOUND_ID_WARNING ,SOUND_ID_WARNING ,SNDMAX_WARNING )) break;
+		if(!Snd_SELoadP(SOUND_ID_SBLASER ,SOUND_ID_SBLASER ,SNDMAX_SBLASER )) break;
+		if(!Snd_SELoadP(SOUND_ID_BUZZ    ,SOUND_ID_BUZZ    ,SNDMAX_BUZZ))     break;
+		if(!Snd_SELoadP(SOUND_ID_MISSILE ,SOUND_ID_MISSILE ,SNDMAX_MISSILE )) break;
+		if(!Snd_SELoadP(SOUND_ID_JOINT   ,SOUND_ID_JOINT   ,SNDMAX_JOINT   )) break;
+		if(!Snd_SELoadP(SOUND_ID_DEAD    ,SOUND_ID_DEAD    ,SNDMAX_DEAD    )) break;
+		if(!Snd_SELoadP(SOUND_ID_SBBOMB  ,SOUND_ID_SBBOMB  ,SNDMAX_SBBOMB  )) break;
+		if(!Snd_SELoadP(SOUND_ID_BOSSBOMB,SOUND_ID_BOSSBOMB,SNDMAX_BOSSBOMB)) break;
+		if(!Snd_SELoadP(SOUND_ID_ENEMYSHOT,SOUND_ID_ENEMYSHOT,SNDMAX_ENEMYSHOT)) break;
+		if(!Snd_SELoadP(SOUND_ID_HLASER, SOUND_ID_HLASER, SNDMAX_HLASER))	break;
+		if(!Snd_SELoadP(SOUND_ID_TAMEFAST, SOUND_ID_TAMEFAST, SNDMAX_TAMEFAST))	break;
+		if(!Snd_SELoadP(SOUND_ID_WARP, SOUND_ID_WARP, SNDMAX_WARP))	break;
 
 		// DirectSound can only apply volume onto loaded buffers.
 		Snd_UpdateVolumes();
@@ -1368,12 +1296,6 @@ bool LoadSound(const PACKFILE_READ& in)
 	return false;
 }
 
-bool LoadSound(void)
-{
-	return LoadSound(DAT::Packfile(DAT::PACK_ID::SOUND));
-}
-
-
 // MusicRoom のコメントをロードする //
 bool LoadMusicRoomComment(int no)
 {
@@ -1384,15 +1306,12 @@ bool LoadMusicRoomComment(int no)
 		return false;
 	}
 	const auto& text = MusicRoomText.value();
-	//const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
-	//return text.PrerenderTitleAndComment(enemy.MemExpand(27 + no), no);
 	std::u8string comment_file_path = GetFilePath(27 + no, u8"enemy\\", u8".MUS");
 	return text.PrerenderTitleAndComment(FileLoad(comment_file_path.c_str()), no);
 }
 
 BYTE_BUFFER_OWNED LoadDemo(int stage)
 {
-	//return DAT::Packfile(DAT::PACK_ID::ENEMY).MemExpand(stage - 1 + 18);
 	std::u8string demo_file_path = GetFilePath(stage - 1 + 18, u8"enemy\\", u8".DEM");
 	return FileLoad(demo_file_path.c_str());
 }
