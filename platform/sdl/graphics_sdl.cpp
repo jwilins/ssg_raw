@@ -4,8 +4,19 @@
  */
 
 // SDL headers must come first to avoid import→#include bugs on Clang 19.
+#ifdef SDL3
+#include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_mouse.h>
+#include <SDL3/SDL_render.h>
+
+using SDL_COLOR = SDL_FColor;
+#else
 #include <SDL_mouse.h>
 #include <SDL_render.h>
+
+using SDL_COLOR = SDL_Color;
+#endif
+#include "platform/sdl/sdl2_wrap.h"
 
 #include "platform/sdl/graphics_sdl.h"
 #include "platform/sdl/log_sdl.h"
@@ -22,23 +33,31 @@ static constexpr auto LOG_CAT = SDL_LOG_CATEGORY_RENDER;
 /// State
 /// -----
 
-PIXELFORMAT PreferredPixelFormat;
-SDL_ScaleMode TextureScaleMode = SDL_ScaleModeNearest;
+std::optional<PIXELFORMAT> PreferredPixelFormat;
+SDL_ScaleMode TextureScaleMode = SDL_SCALEMODE_NEAREST;
 
 // Primary renderer
 // ----------------
 // Probably hardware-accelerated, but not necessarily.
 
 SDL_Renderer *PrimaryRenderer = nullptr;
+#ifdef SDL2
 SDL_RendererInfo PrimaryInfo;
+#endif
+
+// Same lifetime as either [PrimaryRenderer] (SDL 3) or [PrimaryInfo] (SDL 2).
+std::span<const SDL_PixelFormat> PrimaryFormats;
 
 // Rendering target in framebuffer scale mode. Not to be confused with
 // [SoftwareTexture], which is a streaming texture, not a render target.
 SDL_Texture *PrimaryTexture = nullptr;
 
+#ifdef SDL2
 // Buffer for screenshots at non-native resolutions when using geometry
-// scaling. Allocated on demand.
+// scaling. Allocated on demand… in SDL 2, at least, SDL 3 insists on
+// allocating a new surface on every call to SDL_RenderReadPixels().
 SDL_Surface *GeometryScaledBackbuffer = nullptr;
+#endif
 // ----------------
 
 // Software renderer
@@ -54,9 +73,12 @@ SDL_Surface *SoftwareSurface = nullptr;
 // Not to be confused with [PrimaryTexture], which is a render target, not a
 // streaming texture.
 SDL_Texture *SoftwareTexture = nullptr;
+
+static SDL_Texture *EnsureSoftwareTexture(void);
 // -----------------
 
-SDL_Renderer *Renderer = nullptr;
+// Either [PrimaryRenderer] or [SoftwareRenderer].
+SDL_Renderer **Renderer = &PrimaryRenderer;
 
 // Storing their associated renderer (primary or software) in the user data.
 ENUMARRAY<SDL_Texture *, SURFACE_ID> Textures;
@@ -109,28 +131,56 @@ constinit const ENUMARRAY<
 // Helpers
 // -------
 
-SDL_FPoint HelpFPointFrom(const WINDOW_POINT& p)
+SDL_PixelFormat HelpFormatFrom(const SDL_Surface *surface)
 {
-	return SDL_FPoint{ static_cast<float>(p.x), static_cast<float>(p.y) };
+#ifdef SDL3
+	return surface->format;
+#else
+	return surface->format->format;
+#endif
 }
 
-SDL_Color HelpColorFrom(const RGBA& o)
+std::optional<PIXELFORMAT> HelpPixelFormatFrom(SDL_PixelFormat format)
 {
-	return SDL_Color{ .r = o.r, .g = o.g, .b = o.b, .a = o.a };
+	switch(format) {
+	case SDL_PIXELFORMAT_ABGR8888:
+		return std::make_optional<PIXELFORMAT>(PIXELFORMAT::RGBA8888);
+	case SDL_PIXELFORMAT_ARGB8888:
+		return std::make_optional<PIXELFORMAT>(PIXELFORMAT::BGRA8888);
+	case SDL_PIXELFORMAT_XRGB8888:
+		return std::make_optional<PIXELFORMAT>(PIXELFORMAT::BGRX8888);
+	default:
+		return std::nullopt;
+	}
 }
 
-SDL_Rect HelpRectFrom(const PIXEL_LTWH& o) noexcept
+SDL_PixelFormat HelpPixelFormatFrom(PIXELFORMAT format)
 {
-	return SDL_Rect{ .x = o.left, .y = o.top, .w = o.w, .h = o.h };
+	switch(format.format) {
+	case PIXELFORMAT::RGBA8888: return SDL_PIXELFORMAT_ABGR8888;
+	case PIXELFORMAT::BGRA8888: return SDL_PIXELFORMAT_ARGB8888;
+	case PIXELFORMAT::BGRX8888: return SDL_PIXELFORMAT_XRGB8888;
+	default:                    return SDL_PIXELFORMAT_UNKNOWN;
+	}
 }
 
-SDL_Rect HelpRectFrom(const PIXEL_LTRB& o)
+template <typename Rect> Rect HelpRectTo(const PIXEL_LTWH& o) noexcept
 {
-	return SDL_Rect{
-		.x = o.left,
-		.y = o.top,
-		.w = (o.right - o.left),
-		.h = (o.bottom - o.top),
+	return Rect{
+		.x = static_cast<decltype(Rect::x)>(o.left),
+		.y = static_cast<decltype(Rect::y)>(o.top),
+		.w = static_cast<decltype(Rect::w)>(o.w),
+		.h = static_cast<decltype(Rect::h)>(o.h),
+	};
+}
+
+template <typename Rect> Rect HelpRectTo(const PIXEL_LTRB& o)
+{
+	return Rect{
+		.x = static_cast<decltype(Rect::x)>(o.left),
+		.y = static_cast<decltype(Rect::y)>(o.top),
+		.w = static_cast<decltype(Rect::w)>(o.right - o.left),
+		.h = static_cast<decltype(Rect::h)>(o.bottom - o.top),
 	};
 }
 
@@ -143,31 +193,24 @@ std::span<const SDL_FPoint> HelpFPointsFrom(VERTEX_XY_SPAN<> sp)
 	return { reinterpret_cast<const SDL_FPoint *>(sp.data()), sp.size() };
 }
 
-std::span<const SDL_Color> HelpColorsFrom(VERTEX_RGBA_SPAN<> sp)
+std::span<const SDL_COLOR> HelpColorsFrom(VERTEX_RGBA_SPAN<> sp)
 {
 	using GT = decltype(sp)::value_type;
-	static_assert(sizeof(SDL_Color) == sizeof(GT));
-	static_assert(std::is_same_v<decltype(SDL_Color::r), decltype(GT::r)>);
-	static_assert(std::is_same_v<decltype(SDL_Color::g), decltype(GT::g)>);
-	static_assert(std::is_same_v<decltype(SDL_Color::b), decltype(GT::b)>);
-	static_assert(std::is_same_v<decltype(SDL_Color::a), decltype(GT::a)>);
-	return { reinterpret_cast<const SDL_Color *>(sp.data()), sp.size() };
+	static_assert(sizeof(SDL_COLOR) == sizeof(GT));
+	static_assert(std::is_same_v<decltype(SDL_COLOR::r), decltype(GT::r)>);
+	static_assert(std::is_same_v<decltype(SDL_COLOR::g), decltype(GT::g)>);
+	static_assert(std::is_same_v<decltype(SDL_COLOR::b), decltype(GT::b)>);
+	static_assert(std::is_same_v<decltype(SDL_COLOR::a), decltype(GT::a)>);
+	return { std::bit_cast<const SDL_COLOR *>(sp.data()), sp.size() };
 }
 
-SDL_Texture *TexturePostInit(SDL_Texture& tex)
+SDL_Texture *TexturePostInit(SDL_Texture& tex, SDL_Renderer *renderer)
 {
-	SDL_SetTextureUserData(&tex, Renderer);
+#ifdef SDL2
+	SDL_SetTextureUserData(&tex, renderer);
+#endif
 	SDL_SetTextureScaleMode(&tex, TextureScaleMode);
 	return &tex;
-}
-
-SDL_Texture *HelpCreateTexture(uint32_t format, int access, int w, int h)
-{
-	auto *ret = SDL_CreateTexture(Renderer, format, access, w, h);
-	if(!ret) {
-		return ret;
-	}
-	return TexturePostInit(*ret);
 }
 
 // In SDL 2, switching from a texture render target back to NULL not only
@@ -178,6 +221,11 @@ SDL_Texture *HelpCreateTexture(uint32_t format, int access, int w, int h)
 // rectangle. SDL 3 fixes this by storing this view state as a part of each
 // render target.
 class SDL2_RENDER_TARGET_QUIRK_WORKAROUND {
+#ifdef SDL3
+public:
+	SDL2_RENDER_TARGET_QUIRK_WORKAROUND(SDL_Renderer& renderer) {}
+	~SDL2_RENDER_TARGET_QUIRK_WORKAROUND() {}
+#else
 	SDL_Renderer& renderer;
 	bool did_clip{};
 	SDL_Rect clip{};
@@ -195,6 +243,7 @@ public:
 			SDL_RenderSetClipRect(&renderer, &clip);
 		}
 	}
+#endif
 };
 
 template <typename T> [[nodiscard]] T *SafeDestroy(void Destroy(T *), T *v)
@@ -206,75 +255,130 @@ template <typename T> [[nodiscard]] T *SafeDestroy(void Destroy(T *), T *v)
 	return v;
 }
 
-int SetRenderTargetFor(const SDL_Renderer *renderer)
+bool SetRenderTargetFor(const SDL_Renderer *renderer)
 {
 	if(renderer == SoftwareRenderer) {
-		return SDL_SetRenderTarget(PrimaryRenderer, nullptr);
+		return !HelpFailed(SDL_SetRenderTarget(PrimaryRenderer, nullptr));
 	} else if((renderer == PrimaryRenderer) && PrimaryTexture) {
-		return SDL_SetRenderTarget(PrimaryRenderer, PrimaryTexture);
+		return !HelpFailed(
+			SDL_SetRenderTarget(PrimaryRenderer, PrimaryTexture)
+		);
 	}
-	return 0;
+	return true;
 }
 
-void SwitchActiveRenderer(SDL_Renderer *new_renderer)
+void SwitchActiveRenderer(SDL_Renderer **new_renderer)
 {
 	for(auto& tex : Textures) {
-		if(tex && (SDL_GetTextureUserData(tex) == Renderer)) {
+		if(!tex) {
+			continue;
+		}
+		const auto *renderer = (
+#ifdef SDL3
+			SDL_GetRendererFromTexture(tex)
+#else
+			SDL_GetTextureUserData(tex)
+#endif
+		);
+		if(tex && (renderer == *Renderer)) {
 			tex = SafeDestroy(SDL_DestroyTexture, tex);
 		}
 	}
-	SetRenderTargetFor(new_renderer);
+	SetRenderTargetFor(*new_renderer);
 	Renderer = new_renderer;
 }
 
-bool PixelFormatSupported(uint32_t fmt)
-{
-	// Both screenshots and the Pango/Cairo text backend currently expect ARGB
-	// order.
-	if(SDL_PIXELORDER(fmt) == SDL_PACKEDORDER_ABGR) {
-		return false;
-	}
-	return (
-		(SDL_ISPIXELFORMAT_PACKED(fmt) || SDL_ISPIXELFORMAT_INDEXED(fmt)) &&
-		BITDEPTHS::find(SDL_BITSPERPIXEL(fmt))
-	);
-}
-
-bool HelpSwitchFullscreen(
+std::optional<GRAPHICS_FULLSCREEN_FLAGS> HelpSwitchFullscreen(
 	const GRAPHICS_FULLSCREEN_FLAGS& fs_prev,
 	const GRAPHICS_FULLSCREEN_FLAGS& fs_new
 )
 {
 	auto *window = WndBackend_SDL();
+
+	if(!fs_prev.fullscreen && fs_new.fullscreen) {
+		TopleftBeforeFullscreen = HelpGetWindowPosition(window);
+	}
+
+#ifdef SDL3
+	const auto fs_actual = HelpSetFullscreenMode(window, fs_new);
+	if(!fs_actual) {
+		return std::nullopt;
+	}
+#else
 	if(SDL_SetWindowFullscreen(window, HelpFullscreenFlag(fs_new)) != 0) {
 		Log_Fail(LOG_CAT, "Error changing display mode");
-		return false;
+		return std::nullopt;
 	}
+	const auto& fs_actual = fs_new;
+#endif
 
 	// If we come out of fullscreen mode, recenter the window.
 	if(fs_prev.fullscreen && !fs_new.fullscreen) {
-		const auto disp_i = std::max(SDL_GetWindowDisplayIndex(window), 0);
-		const auto center = SDL_WINDOWPOS_CENTERED_DISPLAY(disp_i);
+		const auto display_i = HelpGetDisplayForWindow();
+		const auto center = SDL_WINDOWPOS_CENTERED_DISPLAY(display_i);
 		SDL_SetWindowPosition(window, center, center);
 	}
-	return true;
+	return fs_actual;
 }
 // -------
 
 // Pretty API version strings
 // --------------------------
 
+constexpr std::pair<std::u8string_view, std::u8string_view> API_NICE[] = {
+	{ u8"direct3d", u8"Direct3D 9" },
+	{ u8"direct3d11", u8"Direct3D 11" },
+	{ u8"direct3d12", u8"Direct3D 12" },
+	{ u8"software", u8"Software" },
+	{ u8"vulkan", u8"Vulkan" },
+};
+
 namespace APIVersions {
-constexpr const char FMT[] = "%s %d.%d";
+constexpr const char GPU_FMT[] = "GPU (%s)";
+constexpr const char OPENGL_FMT[] = "%s %d.%d";
 constexpr size_t PRETTY_SIZE_MAX = 9;
-constexpr size_t FMT_SIZE = ((sizeof(FMT) - 1) + (2 * STRING_NUM_CAP<int>));
+constexpr size_t API_SIZE_MAX = std::ranges::max_element(
+	API_NICE, [](const auto& a, const auto& b) {
+		return (a.second.size() < b.second.size());
+	}
+)->second.size();
+constexpr size_t FMT_SIZE = std::max(
+	(sizeof(GPU_FMT) + API_SIZE_MAX),
+	(PRETTY_SIZE_MAX + 1 + STRING_NUM_CAP<int> + 1 + STRING_NUM_CAP<int>)
+);
 
 struct VERSION {
 	std::u8string_view name_sdl;
 	const char *name_pretty;
 	void (*update)(VERSION& self);
-	char8_t buf[FMT_SIZE + PRETTY_SIZE_MAX + 1];
+	char8_t buf[FMT_SIZE + 1];
 };
+
+#ifdef SDL3
+void UpdateGPU(VERSION& self)
+{
+	const auto props = SDL_GetRendererProperties(PrimaryRenderer);
+	auto *gpu_device = static_cast<SDL_GPUDevice *>(SDL_GetPointerProperty(
+		props, SDL_PROP_RENDERER_GPU_DEVICE_POINTER, nullptr
+	));
+
+	std::u8string_view device_name = reinterpret_cast<const char8_t *>(
+		SDL_GetGPUDeviceDriver(gpu_device)
+	);
+	for(const auto& nice : API_NICE) {
+		if(nice.first == device_name) {
+			device_name = nice.second;
+			break;
+		}
+	}
+	auto *buf = reinterpret_cast<char *>(self.buf);
+	const auto *via_name = (device_name.empty()
+		? "?"
+		: reinterpret_cast<const char *>(device_name.data())
+	);
+	sprintf(&buf[0], &GPU_FMT[0], via_name);
+}
+#endif
 
 void UpdateOpenGL(VERSION& self)
 {
@@ -284,13 +388,16 @@ void UpdateOpenGL(VERSION& self)
 	SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
 
 	auto* buf = reinterpret_cast<char *>(self.buf);
-	sprintf(&buf[0], &FMT[0], self.name_pretty, major, minor);
+	sprintf(&buf[0], &OPENGL_FMT[0], self.name_pretty, major, minor);
 }
 
 #define TARGET_(pretty, maj, min) pretty " ~" #maj "." #min
 #define TARGET(pretty, maj, min) TARGET_(pretty, maj, min)
 
 constinit VERSION Versions[] = {
+#ifdef SDL3
+	{ u8"gpu", nullptr, UpdateGPU, u8"GPU" },
+#endif
 	{ u8"opengl", "OpenGL", UpdateOpenGL, TARGET(
 		u8"OpenGL", OPENGL_TARGET_CORE_MAJ, OPENGL_TARGET_CORE_MIN
 	) },
@@ -332,13 +439,6 @@ int8_t GrpBackend_APICount(void)
 	return SDL_GetNumRenderDrivers();
 }
 
-constexpr std::pair<std::u8string_view, std::u8string_view> API_NICE[] = {
-	{ u8"direct3d", u8"Direct3D 9" },
-	{ u8"direct3d11", u8"Direct3D 11" },
-	{ u8"direct3d12", u8"Direct3D 12" },
-	{ u8"software", u8"Software" },
-};
-
 std::u8string_view GrpBackend_APIName(int8_t id)
 {
 	const auto ret = WndBackend_SDLRendererName(id);
@@ -358,21 +458,25 @@ std::u8string_view GrpBackend_APIName(int8_t id)
 PIXEL_SIZE GrpBackend_DisplaySize(bool fullscreen)
 {
 	SDL_Rect rect{};
-	SDL_DisplayMode display_mode{};
-	auto *window = WndBackend_SDL();
-	const auto display_i = (
-		window ? std::max(SDL_GetWindowDisplayIndex(window), 0) : 0
-	);
-	const auto ret = (fullscreen
-		? SDL_GetDesktopDisplayMode(display_i, &display_mode)
-		: SDL_GetDisplayUsableBounds(display_i, &rect)
-	);
-	if(ret != 0) {
+	const auto display_i = HelpGetDisplayForWindow();
+	if(fullscreen) {
+#ifdef SDL3
+		const auto *display_mode = SDL_GetDesktopDisplayMode(display_i);
+		if(!display_mode) {
+#else
+		SDL_DisplayMode display_mode_local{};
+		const auto *display_mode = &display_mode_local;
+		if(SDL_GetDesktopDisplayMode(display_i, &display_mode_local) != 0) {
+#endif
+			Log_Fail(LOG_CAT, "Error retrieving display size");
+			return GRP_RES;
+		}
+		return { .w = display_mode->w, .h = display_mode->h };
+	}
+
+	if(HelpFailed(SDL_GetDisplayUsableBounds(display_i, &rect))) {
 		Log_Fail(LOG_CAT, "Error retrieving display size");
 		return GRP_RES;
-	}
-	if(fullscreen) {
-		return { .w = display_mode.w, .h = display_mode.h };
 	}
 	return { .w = rect.w, .h = rect.h };
 }
@@ -388,15 +492,22 @@ bool DestroySoftwareRenderer(void)
 	return false;
 }
 
-void PrimaryCleanup(void)
+std::nullopt_t PrimaryCleanup(void)
 {
 	for(auto& tex : Textures) {
 		tex = SafeDestroy(SDL_DestroyTexture, tex);
 	}
+	SoftwareTexture = SafeDestroy(SDL_DestroyTexture, SoftwareTexture);
 	PrimaryTexture = SafeDestroy(SDL_DestroyTexture, PrimaryTexture);
 	PrimaryRenderer = SafeDestroy(SDL_DestroyRenderer, PrimaryRenderer);
-	Renderer = nullptr;
+
+	// On my system, switching from any Direct3D version to OpenGL sometimes
+	// breaks rendering and freezes the window on the last frame rendered by
+	// Direct3D. So it makes sense to unconditionally destroy and recreate the
+	// window when switching APIs. (Also feels more effective, in a way.)
 	WndBackend_Cleanup();
+
+	return std::nullopt;
 }
 
 // Returns the new `SCALE_GEOMETRY` flag.
@@ -408,10 +519,28 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 				*PrimaryRenderer
 			};
 			PrimaryTexture = SafeDestroy(SDL_DestroyTexture, PrimaryTexture);
+#ifdef SDL3
+			SDL_SetRenderLogicalPresentation(
+				PrimaryRenderer,
+				GRP_RES.w,
+				GRP_RES.h,
+				SDL_LOGICAL_PRESENTATION_STRETCH
+			);
+#else
 			SDL_RenderSetLogicalSize(PrimaryRenderer, GRP_RES.w, GRP_RES.h);
 			// [wa] must drop after SDL_RenderSetLogicalSize()!
+#endif
 		} else {
+#ifdef SDL3
+			SDL_SetRenderLogicalPresentation(
+				PrimaryRenderer,
+				GRP_RES.w,
+				GRP_RES.h,
+				SDL_LOGICAL_PRESENTATION_STRETCH
+			);
+#else
 			SDL_RenderSetLogicalSize(PrimaryRenderer, GRP_RES.w, GRP_RES.h);
+#endif
 		}
 		return true;
 	};
@@ -419,9 +548,9 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 	// Update texture filters
 	// ----------------------
 	if((scaled_res.w % GRP_RES.w) || (scaled_res.h % GRP_RES.h)) {
-		TextureScaleMode = SDL_ScaleModeBest;
+		TextureScaleMode = SDL_SCALEMODE_LINEAR;
 	} else {
-		TextureScaleMode = SDL_ScaleModeNearest;
+		TextureScaleMode = SDL_SCALEMODE_NEAREST;
 	}
 	for(auto& tex : Textures) {
 		if(tex) {
@@ -436,19 +565,23 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 	}
 	// ----------------------
 
+#ifdef SDL2
 	GeometryScaledBackbuffer = SafeDestroy(
-		SDL_FreeSurface, GeometryScaledBackbuffer
+		SDL_DestroySurface, GeometryScaledBackbuffer
 	);
+#endif
 	if(geometry || (scaled_res == GRP_RES)) {
 		set_geometry();
 		return geometry; // Don't unset the user's choice on 1× scaling!
 	}
 
 	assert(!geometry);
+#ifdef SDL2
 	if(!SDL_RenderTargetSupported(PrimaryRenderer)) {
 		Log_Fail(LOG_CAT, "Render API does not support render targets");
 		return set_geometry();
 	}
+#endif
 
 	// Prepare the primary renderer for blitting the primary texture:
 	// • Ensure the correct logical size
@@ -456,14 +589,23 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 	//   target (won't be needed in SDL 3)
 	// • Stop clipping on the primary renderer!!! Its clipping region is going
 	//   to apply to the [PrimaryTexture] blit going forward!!!
-	const auto wa = SDL2_RENDER_TARGET_QUIRK_WORKAROUND{ *Renderer };
+	const auto wa = SDL2_RENDER_TARGET_QUIRK_WORKAROUND{ **Renderer };
 	SDL_SetRenderTarget(PrimaryRenderer, nullptr);
-	SDL_RenderSetClipRect(PrimaryRenderer, nullptr);
+	SDL_SetRenderClipRect(PrimaryRenderer, nullptr);
+#ifdef SDL3
+	SDL_SetRenderLogicalPresentation(
+		PrimaryRenderer,
+		scaled_res.w,
+		scaled_res.h,
+		SDL_LOGICAL_PRESENTATION_DISABLED
+	);
+#else
 	SDL_RenderSetLogicalSize(PrimaryRenderer, scaled_res.w, scaled_res.h);
+#endif
 
 	if(!PrimaryTexture) {
 		assert(SoftwareSurface);
-		const auto format = SoftwareSurface->format->format;
+		const auto format = HelpFormatFrom(SoftwareSurface);
 		const auto& res = GRP_RES;
 		PrimaryTexture = SDL_CreateTexture(
 			PrimaryRenderer, format, SDL_TEXTUREACCESS_TARGET, res.w, res.h
@@ -476,7 +618,7 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 	}
 
 	// We might be software-rendering.
-	if(SetRenderTargetFor(Renderer) != 0) {
+	if(!SetRenderTargetFor(*Renderer)) {
 		Log_Fail(LOG_CAT, "Error setting texture as render target");
 		return set_geometry();
 	}
@@ -485,7 +627,7 @@ bool PrimarySetScale(bool geometry, const WINDOW_SIZE& scaled_res)
 
 // Re-centers the window to remain fully on-screen after changing the
 // windowed-mode scale factor
-void RepositionAfterScale(
+PIXEL_POINT RepositionAfterScale(
 	const PIXEL_POINT& topleft_prev,
 	const WINDOW_SIZE& res_prev,
 	const WINDOW_SIZE& res_new
@@ -500,13 +642,20 @@ void RepositionAfterScale(
 		window, &border_top, &border_left, &border_bottom, &border_right
 	);
 
+#ifdef SDL3
+	const auto display_i = SDL_GetDisplayForWindow(window);
+	if(display_i == 0) {
+		return topleft_prev;
+	}
+#else
 	const auto display_i = SDL_GetWindowDisplayIndex(window);
 	if(display_i < 0) {
-		return;
+		return topleft_prev;
 	}
+#endif
 	SDL_Rect display_r{};
-	if(SDL_GetDisplayUsableBounds(display_i, &display_r) != 0) {
-		return;
+	if(HelpFailed(SDL_GetDisplayUsableBounds(display_i, &display_r))) {
+		return topleft_prev;
 	}
 	display_r.x += border_left;
 	display_r.y += border_top;
@@ -526,6 +675,7 @@ void RepositionAfterScale(
 	topleft.x = std::clamp(topleft.x, display_r.x, max_left);
 	topleft.y = std::clamp(topleft.y, display_r.y, max_top);
 	SDL_SetWindowPosition(window, topleft.x, topleft.y);
+	return topleft;
 }
 
 void PrimarySetBorderlessFullscreenFit(
@@ -542,6 +692,18 @@ void PrimarySetBorderlessFullscreenFit(
 	SDL_SetRenderTarget(PrimaryRenderer, nullptr);
 
 	if(fs.fullscreen && !fs.exclusive) {
+#ifdef SDL3
+		constexpr auto MODES = [] {
+			ENUMARRAY<SDL_RendererLogicalPresentation, FIT> ret;
+			ret[FIT::INTEGER] = SDL_LOGICAL_PRESENTATION_INTEGER_SCALE;
+			ret[FIT::ASPECT] = SDL_LOGICAL_PRESENTATION_LETTERBOX;
+			ret[FIT::STRETCH] = SDL_LOGICAL_PRESENTATION_STRETCH;
+			return ret;
+		}();
+		SDL_SetRenderLogicalPresentation(
+			PrimaryRenderer, GRP_RES.w, GRP_RES.h, MODES[fs.fit]
+		);
+#else
 		SDL_RenderSetIntegerScale(
 			PrimaryRenderer, ((fs.fit == FIT::INTEGER) ? SDL_TRUE : SDL_FALSE)
 		);
@@ -554,69 +716,99 @@ void PrimarySetBorderlessFullscreenFit(
 			SDL_RenderSetScale(PrimaryRenderer, scale_w, scale_h);
 			SDL_RenderSetViewport(PrimaryRenderer, nullptr);
 		}
-	} else {
-		SDL_RenderSetIntegerScale(PrimaryRenderer, SDL_FALSE);
+#endif
 	}
 	SDL_SetRenderTarget(PrimaryRenderer, target);
 }
 
 std::optional<GRAPHICS_INIT_RESULT> PrimaryInitFull(GRAPHICS_PARAMS params)
 {
-	auto *window = WndBackend_SDLCreate(params);
-	auto *renderer = SDL_CreateRenderer(
-		window, params.api, SDL_RENDERER_ACCELERATED
+	const auto maybe_params = WndBackend_Create(params);
+	if(!maybe_params) {
+		return std::nullopt;
+	}
+	params = maybe_params.value();
+
+#ifdef SDL3
+	const auto *driver = SDL_GetRenderDriver(params.api);
+	PrimaryRenderer = SDL_CreateRenderer(WndBackend_SDL(), driver);
+#else
+	PrimaryRenderer = SDL_CreateRenderer(
+		WndBackend_SDL(), params.api, SDL_RENDERER_ACCELERATED
 	);
-	if(!renderer) {
+#endif
+	if(!PrimaryRenderer) {
 		const auto api_name = GrpBackend_APIName(params.api);
 		const auto* api = std::bit_cast<const char *>(api_name.data());
 		SDL_LogCritical(
 			LOG_CAT, "Error creating %s renderer: %s", api, SDL_GetError()
 		);
-		WndBackend_Cleanup();
-		return std::nullopt;
+		return PrimaryCleanup();
 	}
-	SDL_GetRendererInfo(renderer, &PrimaryInfo);
 
-	// Determine preferred texture formats.
+#ifdef SDL3
+	const auto props = SDL_GetRendererProperties(PrimaryRenderer);
+	const auto *formats_start = static_cast<const SDL_PixelFormat *>(
+		SDL_GetPointerProperty(
+			props, SDL_PROP_RENDERER_TEXTURE_FORMATS_POINTER, nullptr
+		)
+	);
+	auto *formats_end = formats_start;
+	while(*formats_end != SDL_PIXELFORMAT_UNKNOWN) {
+		formats_end++;
+	}
+	PrimaryFormats = {
+		formats_start,
+		static_cast<size_t>(formats_end - formats_start),
+	};
+#else
+	SDL_GetRendererInfo(PrimaryRenderer, &PrimaryInfo);
+	PrimaryFormats = std::span(
+		&PrimaryInfo.texture_formats[0], PrimaryInfo.num_texture_formats
+	);
+#endif
+
+	// Determine the preferred texture format. We don't overwrite
+	// [params.bitdepth] here to allow frictionless switching between the old
+	// DirectDraw/Direct3D backend and this one.
 	// SDL_GetWindowPixelFormat() is *not* a shortcut we could use for software
 	// rendering mode. On my system, it always returns the 24-bit RGB888, which
 	// we don't support.
-	const auto formats = std::span(
-		&PrimaryInfo.texture_formats[0], PrimaryInfo.num_texture_formats
-	);
-	const auto sdl_format = std::ranges::find_if(formats, PixelFormatSupported);
-	if(sdl_format == formats.end()) {
+	SDL_PixelFormat sdl_format = SDL_PIXELFORMAT_UNKNOWN;
+	for(const auto format : PrimaryFormats) {
+		const auto maybe_pixel_format = HelpPixelFormatFrom(format);
+		if(!maybe_pixel_format) {
+			continue;
+		}
+		const auto pixel_format = maybe_pixel_format.value();
+		PreferredPixelFormat = pixel_format;
+		sdl_format = format;
+
+		// Both libwebp and BMP highly favor in-memory BGRA order.
+		if(pixel_format.format == PIXELFORMAT::BGRA8888) {
+			break;
+		}
+	}
+	if(!PreferredPixelFormat || (sdl_format == SDL_PIXELFORMAT_UNKNOWN)) {
+		const auto api_name = GrpBackend_APIName(params.api);
 		SDL_LogCritical(
 			LOG_CAT,
 			"The \"%s\" renderer does not support any of the game's supported software rendering pixel formats.",
-			PrimaryInfo.name
+			std::bit_cast<const char *>(api_name.data())
 		);
-		return std::nullopt;
+		return PrimaryCleanup();
 	}
 
-	PrimaryRenderer = renderer;
-	SwitchActiveRenderer(PrimaryRenderer);
+	SetRenderTargetFor(PrimaryRenderer);
 	APIVersions::Update(params.api);
 
-	const auto bpp = SDL_BITSPERPIXEL(*sdl_format);
-	const auto pixel_format = BITDEPTHS::find(bpp).pixel_format();
-	if(!pixel_format) {
-		assert(!"The pixel format should always be valid here");
-		std::unreachable();
-	}
-	// We don't overwrite [params.bitdepth] here to allow frictionless
-	// switching between the old DirectDraw/Direct3D backend and this one.
-	PreferredPixelFormat = pixel_format.value();
-
 	// Ensure that the software surface uses the preferred format
-	if(!SoftwareSurface || (SoftwareSurface->format->format != *sdl_format)) {
-		SoftwareSurface = SafeDestroy(SDL_FreeSurface, SoftwareSurface);
-		SoftwareSurface = SDL_CreateRGBSurfaceWithFormat(
-			0, GRP_RES.w, GRP_RES.h, 0, *sdl_format
-		);
+	if(!SoftwareSurface || (HelpFormatFrom(SoftwareSurface) != sdl_format)) {
+		SoftwareSurface = SafeDestroy(SDL_DestroySurface, SoftwareSurface);
+		SoftwareSurface = SDL_CreateSurface(GRP_RES.w, GRP_RES.h, sdl_format);
 		if(!SoftwareSurface) {
 			Log_Fail(LOG_CAT, "Error creating surface for software rendering");
-			return std::nullopt;
+			return PrimaryCleanup();
 		}
 	}
 
@@ -641,7 +833,19 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 
 	// This is the only place that applies to both a full init and a partial
 	// update later...
-	SDL_ShowCursor(!(fs_new.fullscreen && fs_new.exclusive));
+	if(fs_new.fullscreen && fs_new.exclusive) {
+#ifdef SDL3
+		SDL_HideCursor();
+#else
+		SDL_ShowCursor(false);
+#endif
+	} else {
+#ifdef SDL3
+		SDL_ShowCursor();
+#else
+		SDL_ShowCursor(true);
+#endif
+	}
 
 	if(!maybe_prev) {
 		return PrimaryInitFull(params);
@@ -664,13 +868,15 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 			return reinit_full(params);
 		}
 
+#ifdef SDL2
 		// If the window started out as borderless and should later switch to
-		// exclusive, SDL simply doesn't do the mode change:
+		// exclusive, SDL 2 simply doesn't do the mode change:
 		//
 		// 	https://github.com/libsdl-org/SDL/issues/11047
 		if(fs_prev.fullscreen && !fs_prev.exclusive) {
 			return reinit_full(params);
 		}
+#endif
 	}
 
 	// The following parameters can be changed on the fly, but we don't want to
@@ -684,13 +890,16 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 		(fs_prev.fullscreen != fs_new.fullscreen) ||
 		(fs_prev.exclusive != fs_new.exclusive)
 	) {
-		if(HelpSwitchFullscreen(fs_prev, fs_new)) {
+		const auto maybe_fs_actual = HelpSwitchFullscreen(fs_prev, fs_new);
+		if(maybe_fs_actual) {
+			const auto& fs_actual = maybe_fs_actual.value();
+
 			// If we clipped on the raw renderer, the clipping rectangle won't
 			// match the current resolution anymore.
-			SDL_RenderSetClipRect(PrimaryRenderer, nullptr);
+			SDL_SetRenderClipRect(PrimaryRenderer, nullptr);
 
-			ret.live.SetFlag(F::FULLSCREEN, fs_new.fullscreen);
-			ret.live.SetFlag(F::FULLSCREEN_EXCLUSIVE, fs_new.exclusive);
+			ret.live.SetFlag(F::FULLSCREEN, fs_actual.fullscreen);
+			ret.live.SetFlag(F::FULLSCREEN_EXCLUSIVE, fs_actual.exclusive);
 		}
 	}
 
@@ -705,7 +914,18 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 		PIXEL_POINT topleft{};
 		SDL_GetWindowPosition(window, &topleft.x, &topleft.y);
 		SDL_SetWindowSize(window, res_new.w, res_new.h);
-		RepositionAfterScale(topleft, res_prev, res_new);
+
+#ifdef SDL3
+		// Necessary for the X11 backend.
+		SDL_SyncWindow(window);
+#endif
+
+		topleft = RepositionAfterScale(topleft, res_prev, res_new);
+		ret.live.left = topleft.x;
+		ret.live.top = topleft.y;
+	} else {
+		ret.live.left = params.left;
+		ret.live.top = params.top;
 	}
 
 	// Should always be applied unconditionally so that the user can change
@@ -726,7 +946,7 @@ void GrpBackend_Cleanup(void)
 {
 	PrimaryCleanup();
 	DestroySoftwareRenderer();
-	SoftwareSurface = SafeDestroy(SDL_FreeSurface, SoftwareSurface);
+	SoftwareSurface = SafeDestroy(SDL_DestroySurface, SoftwareSurface);
 }
 /// --------------------------
 
@@ -735,131 +955,168 @@ void GrpBackend_Cleanup(void)
 
 void GrpBackend_Clear(uint8_t, RGB col)
 {
-	SDL_SetRenderDrawColor(Renderer, col.r, col.g, col.b, 0xFF);
-	SDL_RenderClear(Renderer);
+	SDL_SetRenderDrawColor(*Renderer, col.r, col.g, col.b, 0xFF);
+	SDL_RenderClear(*Renderer);
 }
 
 void GrpBackend_SetClip(const WINDOW_LTRB& rect)
 {
-	if(!Renderer) {
+	if(!*Renderer) {
 		return;
 	}
-	const auto sdl_rect = HelpRectFrom(rect);
-	SDL_RenderSetClipRect(Renderer, &sdl_rect);
+	const auto sdl_rect = HelpRectTo<SDL_Rect>(rect);
+	SDL_SetRenderClipRect(*Renderer, &sdl_rect);
 }
 
 PIXELFORMAT GrpBackend_PixelFormat(void)
 {
-	return PreferredPixelFormat;
+	if(!PreferredPixelFormat) {
+		assert(!"The pixel format should always be valid here");
+		std::unreachable();
+	}
+	return PreferredPixelFormat.value();
 }
 
 void GrpBackend_PaletteGet(PALETTE& pal) {}
 bool GrpBackend_PaletteSet(const PALETTE& pal) { return false; }
 
-void MaybeTakeScreenshot(std::unique_ptr<FILE_STREAM_WRITE> stream)
+void SaveSurfaceAsScreenshot(
+	SDL_Surface *src, const std::chrono::steady_clock::time_point t_start
+)
 {
-	if(!stream) {
+	assert(src);
+	assert(src->pitch >= 0);
+#ifdef SDL3
+	assert(SDL_GetSurfacePalette(src) == nullptr);
+#else
+	assert(src->format->palette == nullptr);
+#endif
+
+	const auto sdl_format = HelpFormatFrom(src);
+	const auto maybe_format = HelpPixelFormatFrom(sdl_format);
+	if(!maybe_format) {
+		SDL_LogCritical(
+			LOG_CAT,
+			"Screenshot buffer format %s is not supported.",
+			SDL_GetPixelFormatName(sdl_format)
+		);
 		return;
 	}
 
-	SDL_Surface* src = SoftwareSurface;
-	bool fill_src_with_pixels_from_renderer = false;
+	assert(src->w >= 0);
+	assert(src->h >= 0);
+	const PIXEL_SIZE_BASE<unsigned int> size = {
+		.w = Cast::sign<unsigned int>(src->w),
+		.h = Cast::sign<unsigned int>(src->h),
+	};
+
+	if(SDL_MUSTLOCK(src)) {
+		SDL_LockSurface(src);
+	}
+	const auto pixels = std::span(
+		static_cast<std::byte *>(src->pixels), (src->h * src->pitch)
+	);
+	Grp_ScreenshotSave(size, maybe_format.value(), {}, pixels, t_start);
+	if(SDL_MUSTLOCK(src)) {
+		SDL_UnlockSurface(src);
+	}
+}
+
+void TakeScreenshot(void)
+{
+	// The rendering itself should not impact screenshot timing.
+	SDL_FlushRenderer(*Renderer);
+	const auto t_start = std::chrono::steady_clock::now();
 
 	if(SoftwareRenderer) {
 		// Software rendering is the ideal case for screenshots, because we
 		// already have a system-memory surface we can save.
-		fill_src_with_pixels_from_renderer = false;
-	} else if(PrimaryTexture) {
-		// Thankfully we can SDL_RenderReadPixels() from a render target to get
-		// a screenshot at the native resolution. [SoftwareSurface] uses the
-		// same size, so let's use it as temporary storage.
-		fill_src_with_pixels_from_renderer = true;
-	} else {
-		// If we aren't scaling, we are lucky and can just do the same we're
-		// doing in the hardware texture case.
+		SaveSurfaceAsScreenshot(SoftwareSurface, t_start);
+		return;
+	}
+
+#ifdef SDL3
+	SDL_Surface *src = SDL_RenderReadPixels(PrimaryRenderer, nullptr);
+	if(!src) {
+		Log_Fail(LOG_CAT, "Error taking screenshot");
+		return;
+	}
+	defer(SDL_DestroySurface(src));
+#else
+	SDL_Surface *src = ([] {
+		if(PrimaryTexture) {
+			// Thankfully we can SDL_RenderReadPixels() from a render target to
+			// get a screenshot at the native resolution. [SoftwareSurface]
+			// uses the same size, so let's use it as temporary storage.
+			return SoftwareSurface;
+		}
+
+		// If we aren't scaling, we are lucky and can just do the same we do in
+		// the hardware texture case.
 		SDL_Rect unscaled_viewport{};
 		float scale_x{}, scale_y{};
 		SDL_RenderGetViewport(PrimaryRenderer, &unscaled_viewport);
 		SDL_RenderGetScale(PrimaryRenderer, &scale_x, &scale_y);
-		const PIXEL_SIZE scaled_size = {
-			.w = static_cast<PIXEL_COORD>(unscaled_viewport.w * scale_x),
-			.h = static_cast<PIXEL_COORD>(unscaled_viewport.h * scale_y),
-		};
-		if(scaled_size == GRP_RES) {
-			fill_src_with_pixels_from_renderer = true;
-		} else {
-			// If we are, we must take a screenshot at the scaled
-			// resolution.
-			if(!GeometryScaledBackbuffer) {
-				const auto format = SoftwareSurface->format->format;
-				GeometryScaledBackbuffer = SDL_CreateRGBSurfaceWithFormat(
-					0, scaled_size.w, scaled_size.h, 0, format
-				);
-			}
-			if(!GeometryScaledBackbuffer) {
-				Log_Fail(
-					LOG_CAT, "Failed to create temporary storage for screenshot"
-				);
-				return;
-			}
-			src = GeometryScaledBackbuffer;
-			fill_src_with_pixels_from_renderer = true;
+		const PIXEL_COORD scaled_w = (unscaled_viewport.w * scale_x);
+		const PIXEL_COORD scaled_h = (unscaled_viewport.h * scale_y);
+		if(
+			(scaled_w == SoftwareSurface->w) && (scaled_h == SoftwareSurface->h)
+		) {
+			return SoftwareSurface;
 		}
+
+		// If we are, we must take a screenshot at the scaled resolution.
+		if(!GeometryScaledBackbuffer) {
+			const auto format = SoftwareSurface->format->format;
+			GeometryScaledBackbuffer = SDL_CreateRGBSurfaceWithFormat(
+				0, scaled_w, scaled_h, 0, format
+			);
+		}
+		return GeometryScaledBackbuffer;
+	})();
+	if(!src) {
+		Log_Fail(LOG_CAT, "Failed to create temporary storage for screenshot");
+		return;
 	}
 
 	if(SDL_MUSTLOCK(src)) {
 		SDL_LockSurface(src);
 	}
-	if(fill_src_with_pixels_from_renderer) {
-		if(SDL_RenderReadPixels(
-			PrimaryRenderer,
-			nullptr,
-			src->format->format,
-			src->pixels,
-			src->pitch
-		) != 0) {
-			Log_Fail(LOG_CAT, "Error taking screenshot");
-			return;
-		}
+	if(SDL_RenderReadPixels(
+		PrimaryRenderer, nullptr, src->format->format, src->pixels, src->pitch
+	) != 0) {
+		Log_Fail(LOG_CAT, "Error taking screenshot");
+		return;
 	}
-	const auto bytes = static_cast<std::byte *>(src->pixels);
-
-	// Negate the height so that we neither have to flip the pixels nor write
-	// RWops for `FILE_STREAM_WRITE` in order to use SDL_SaveBMP_RW().
-	const PIXEL_SIZE size = { .w = src->w, .h = -src->h };
-	assert(src->format->palette == nullptr);
-
-	BMPSave(
-		stream.get(),
-		size,
-		1,
-		src->format->BitsPerPixel,
-		std::span<BGRA>(),
-		std::span(bytes, (src->h * src->pitch))
-	);
 	if(SDL_MUSTLOCK(src)) {
 		SDL_UnlockSurface(src);
 	}
-	stream.reset();
+#endif
+	SaveSurfaceAsScreenshot(src, t_start);
 }
 
-void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream)
+void GrpBackend_Flip(bool take_screenshot)
 {
-	MaybeTakeScreenshot(std::move(screenshot_stream));
+	if(take_screenshot) {
+		TakeScreenshot();
+	}
 	if(SoftwareRenderer) {
+		SDL_FlushRenderer(SoftwareRenderer);
 		if(SDL_MUSTLOCK(SoftwareSurface)) {
 			SDL_LockSurface(SoftwareSurface);
 		}
-		SDL_UpdateTexture(
-			SoftwareTexture,
-			nullptr,
-			SoftwareSurface->pixels,
-			SoftwareSurface->pitch
-		);
-		if(SDL_MUSTLOCK(SoftwareSurface)) {
+		defer(if(SDL_MUSTLOCK(SoftwareSurface)) {
 			SDL_UnlockSurface(SoftwareSurface);
+		});
+		auto *tex = EnsureSoftwareTexture();
+		if(!tex) {
+			return;
 		}
-		SDL_RenderCopy(PrimaryRenderer, SoftwareTexture, nullptr, nullptr);
+		SDL_UpdateTexture(
+			tex, nullptr, SoftwareSurface->pixels, SoftwareSurface->pitch
+		);
+		SDL_RenderTexture(PrimaryRenderer, SoftwareTexture, nullptr, nullptr);
+		SDL_RenderPresent(PrimaryRenderer);
 	} else if(PrimaryTexture) {
 		const auto wa = SDL2_RENDER_TARGET_QUIRK_WORKAROUND{ *PrimaryRenderer };
 		SDL_SetRenderTarget(PrimaryRenderer, nullptr);
@@ -874,10 +1131,17 @@ void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream)
 		// time...
 		GrpBackend_Clear(0, RGB{ 0, 0, 0 });
 
-		SDL_RenderCopy(PrimaryRenderer, PrimaryTexture, nullptr, nullptr);
+		SDL_RenderTexture(PrimaryRenderer, PrimaryTexture, nullptr, nullptr);
+
+		// SDL_RenderPresent() is not allowed to be called when rendering to a
+		// texture, and fails as of SDL 3.2.8:
+		//
+		// 	https://github.com/libsdl-org/SDL/issues/12432
+		SDL_RenderPresent(PrimaryRenderer);
 		SDL_SetRenderTarget(PrimaryRenderer, PrimaryTexture);
+	} else {
+		SDL_RenderPresent(PrimaryRenderer);
 	}
-	SDL_RenderPresent(PrimaryRenderer);
 }
 /// -------
 
@@ -885,27 +1149,32 @@ void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream)
 /// --------
 
 bool CreateTextureWithFormat(
-	SURFACE_ID sid, uint32_t fmt, const PIXEL_SIZE& size
+	SURFACE_ID sid, SDL_PixelFormat fmt, const PIXEL_SIZE& size
 )
 {
 	auto& tex = Textures[sid];
 	tex = SafeDestroy(SDL_DestroyTexture, tex);
 
-	tex = HelpCreateTexture(fmt, SDL_TEXTUREACCESS_STREAMING, size.w, size.h);
+	tex = SDL_CreateTexture(
+		*Renderer, fmt, SDL_TEXTUREACCESS_STREAMING, size.w, size.h
+	);
 	if(!tex) {
 		Log_Fail(LOG_CAT, "Error creating blank texture");
 		return false;
 	}
-	if(SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND) != 0) {
-		Log_Fail(LOG_CAT, "Error enabling alpha blending for GDI text texture");
+	TexturePostInit(*tex, *Renderer);
+	if(HelpFailed(SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND))) {
+		Log_Fail(LOG_CAT, "Error enabling alpha blending for texture");
 		return false;
 	}
 	return true;
 }
 
-bool GrpSurface_CreateUninitialized(SURFACE_ID sid, const PIXEL_SIZE& size)
+bool GrpSurface_CreateUninitialized(
+	SURFACE_ID sid, const PIXEL_SIZE& size, PIXELFORMAT format
+)
 {
-	return CreateTextureWithFormat(sid, SoftwareSurface->format->format, size);
+	return CreateTextureWithFormat(sid, HelpPixelFormatFrom(format), size);
 }
 
 bool GrpSurface_Load(SURFACE_ID sid, BMP_OWNED&& bmp)
@@ -913,12 +1182,12 @@ bool GrpSurface_Load(SURFACE_ID sid, BMP_OWNED&& bmp)
 	auto& tex = Textures[sid];
 	tex = SafeDestroy(SDL_DestroyTexture, tex);
 
-	auto *rwops = SDL_RWFromMem(bmp.buffer.get(), bmp.buffer.size());
-	auto *surf = SDL_LoadBMP_RW(rwops, 1);
-	defer(SDL_FreeSurface(surf));
+	auto *rwops = SDL_IOFromMem(bmp.buffer.get(), bmp.buffer.size());
+	auto *surf = SDL_LoadBMP_IO(rwops, 1);
+	defer(SDL_DestroySurface(surf));
 	std::ignore = std::move(bmp);
 
-	if(surf->format->format == SDL_PIXELFORMAT_INDEX8) {
+	if(HelpFormatFrom(surf) == SDL_PIXELFORMAT_INDEX8) {
 		// The transparent pixel is in the top-left corner.
 		if(SDL_MUSTLOCK(surf)) {
 			SDL_LockSurface(surf);
@@ -927,15 +1196,15 @@ bool GrpSurface_Load(SURFACE_ID sid, BMP_OWNED&& bmp)
 		if(SDL_MUSTLOCK(surf)) {
 			SDL_UnlockSurface(surf);
 		}
-		SDL_SetColorKey(surf, SDL_TRUE, key);
+		SDL_SetSurfaceColorKey(surf, true, key);
 	}
 
-	tex = SDL_CreateTextureFromSurface(Renderer, surf);
+	tex = SDL_CreateTextureFromSurface(*Renderer, surf);
 	if(!tex) {
 		Log_Fail(LOG_CAT, "Error loading .BMP as texture");
 		return false;
 	}
-	TexturePostInit(*tex);
+	TexturePostInit(*tex, *Renderer);
 	return true;
 }
 
@@ -959,31 +1228,55 @@ bool GrpSurface_Update(
 	if(!subrect) {
 		return (SDL_UpdateTexture(tex, nullptr, buf, pitch) == 0);
 	}
-	const auto rect = HelpRectFrom(*subrect);
+	const auto rect = HelpRectTo<SDL_Rect>(*subrect);
 	return (SDL_UpdateTexture(tex, &rect, buf, pitch) == 0);
 }
 
 
 PIXEL_SIZE GrpSurface_Size(SURFACE_ID sid)
 {
-	PIXEL_SIZE ret = { 0, 0 };
 	auto *tex = Textures[sid];
 	if(!tex) {
-		return ret;
+		return { 0, 0 };
 	}
+#ifdef SDL3
+	float w = 0;
+	float h = 0;
+	if(!SDL_GetTextureSize(tex, &w, &h)) {
+		return { 0, 0 };
+	}
+	return {
+		.w = static_cast<PIXEL_COORD>(w),
+		.h = static_cast<PIXEL_COORD>(h),
+	};
+#else
+	PIXEL_SIZE ret = { 0, 0 };
 	SDL_QueryTexture(tex, nullptr, nullptr, &ret.w, &ret.h);
 	return ret;
+#endif
 }
 
 bool GrpSurface_Blit(
 	WINDOW_POINT topleft, SURFACE_ID sid, const PIXEL_LTRB& src
 )
 {
-	const auto rect_src = HelpRectFrom(src);
-	const SDL_Rect rect_dst = {
-		.x = topleft.x, .y = topleft.y, .w = rect_src.w, .h = rect_src.h
+	const auto tex = Textures[sid];
+#ifdef SDL3
+	const auto rect_src = HelpRectTo<SDL_FRect>(src);
+#else
+	const auto rect_src = HelpRectTo<SDL_Rect>(src);
+#endif
+	const SDL_FRect rect_dst = {
+		.x = static_cast<float>(topleft.x),
+		.y = static_cast<float>(topleft.y),
+		.w = static_cast<float>(rect_src.w),
+		.h = static_cast<float>(rect_src.h),
 	};
-	return (SDL_RenderCopy(Renderer, Textures[sid], &rect_src, &rect_dst) == 0);
+#ifdef SDL3
+	return SDL_RenderTexture(*Renderer, tex, &rect_src, &rect_dst);
+#else
+	return (SDL_RenderCopyF(*Renderer, tex, &rect_src, &rect_dst) == 0);
+#endif
 }
 
 void GrpSurface_BlitOpaque(
@@ -998,9 +1291,9 @@ void GrpSurface_BlitOpaque(
 	SDL_SetTextureBlendMode(tex, prev);
 }
 
+#ifdef WIN32
 // Win32 GDI text rendering bridge
 // -------------------------------
-#ifdef WIN32
 
 #include "platform/windows/surface_gdi.h"
 
@@ -1010,7 +1303,7 @@ void GrpSurface_BlitOpaque(
 // memory order for 32-bit bitmaps. Might as well limit the GDI code to that
 // one specific format then.
 static constexpr auto GDITEXT_BPP = 32;
-static constexpr uint32_t GDITEXT_SDL_FORMAT = SDL_PIXELFORMAT_ARGB8888;
+static constexpr auto GDITEXT_SDL_FORMAT = SDL_PIXELFORMAT_ARGB8888;
 
 static SURFACE_GDI GrText;
 
@@ -1026,33 +1319,44 @@ bool GrpSurface_GDIText_Create(int32_t w, int32_t h, RGB colorkey)
 {
 	GrText.Delete();
 
-	const auto formats = std::span(
-		&PrimaryInfo.texture_formats[0], PrimaryInfo.num_texture_formats
-	);
-	if(std::ranges::find(formats, GDITEXT_SDL_FORMAT) == formats.end()) {
+	if(!std::ranges::contains(PrimaryFormats, GDITEXT_SDL_FORMAT)) {
 		SDL_LogCritical(
 			LOG_CAT,
 			"Renderer \"%s\" does not support the BGRA8888 pixel format required for rendering text via GDI.",
+#ifdef SDL3
+			SDL_GetRendererName(PrimaryRenderer)
+#else
 			PrimaryInfo.name
+#endif
 		);
 		return false;
 	};
 
+#ifdef SDL3
+	const auto *format_struct = SDL_GetPixelFormatDetails(GDITEXT_SDL_FORMAT);
+#else
 	auto *format_struct = SDL_AllocFormat(GDITEXT_SDL_FORMAT);
+#endif
 	if(!format_struct) {
 		Log_Fail(
 			LOG_CAT, "Error retrieving format structure for GDI text surface"
 		);
 		return false;
 	}
+#ifdef SDL2
 	defer(SDL_FreeFormat(format_struct));
+#endif
 
 	// GDI always sets the "alpha channel" to 0. Removing it from the color key
 	// as well saves an OR operation in the alpha fixing loop.
 	GDIText_AlphaMask = format_struct->Amask;
 	GDIText_ColorKey = (
+#ifdef SDL3
+		SDL_MapRGB(format_struct, nullptr, colorkey.r, colorkey.g, colorkey.b) &
+#else
 		SDL_MapRGB(format_struct, colorkey.r, colorkey.g, colorkey.b) &
-		 ~GDIText_AlphaMask
+#endif
+		~GDIText_AlphaMask
 	);
 
 	const BITMAPINFOHEADER bmi = {
@@ -1106,8 +1410,8 @@ bool GrpSurface_GDIText_Update(const PIXEL_LTWH& r) noexcept
 	const auto pitch = static_cast<size_t>(dib.dsBm.bmWidthBytes);
 	return GrpSurface_Update(SURFACE_ID::TEXT, &r, { pixels, pitch });
 }
-#endif
 // -------------------------------
+#endif
 /// --------
 
 /// Geometry
@@ -1130,7 +1434,7 @@ void DrawGeometry(
 
 	// Work around SDL's weird -0.5f offset...
 	float offset_x, offset_y;
-	SDL_RenderGetScale(Renderer, &offset_x, &offset_y);
+	SDL_GetRenderScale(*Renderer, &offset_x, &offset_y);
 	offset_x = (1.0f / (2.0f * offset_x));
 	offset_y = (1.0f / (2.0f * offset_y));
 	auto sdl = std::begin(sdl_vertices);
@@ -1139,12 +1443,12 @@ void DrawGeometry(
 	}
 
 	SDL_RenderGeometryRaw(
-		Renderer,
+		*Renderer,
 		nullptr,
 		&sdl_vertices[0].x,
 		sizeof(SDL_FPoint),
 		sdl_colors.data(),
-		((sdl_colors.size() == 1) ? 0 : sizeof(SDL_Color)),
+		((sdl_colors.size() == 1) ? 0 : sizeof(SDL_COLOR)),
 		nullptr,
 		0,
 		vertex_count,
@@ -1156,11 +1460,11 @@ void DrawGeometry(
 
 static void DrawWithAlpha(auto func)
 {
-	SDL_SetRenderDrawBlendMode(Renderer, AlphaMode);
-	SDL_SetRenderDrawColor(Renderer, Col.r, Col.g, Col.b, Col.a);
+	SDL_SetRenderDrawBlendMode(*Renderer, AlphaMode);
+	SDL_SetRenderDrawColor(*Renderer, Col.r, Col.g, Col.b, Col.a);
 	func();
-	SDL_SetRenderDrawColor(Renderer, Col.r, Col.g, Col.b, 0xFF);
-	SDL_SetRenderDrawBlendMode(Renderer, SDL_BLENDMODE_NONE);
+	SDL_SetRenderDrawColor(*Renderer, Col.r, Col.g, Col.b, 0xFF);
+	SDL_SetRenderDrawBlendMode(*Renderer, SDL_BLENDMODE_NONE);
 }
 
 GRAPHICS_GEOMETRY_SDL *GrpGeom_Poly(void)
@@ -1179,7 +1483,7 @@ void GRAPHICS_GEOMETRY_SDL::SetColor(RGB216 col)
 	Col.r = rgb.r;
 	Col.g = rgb.g;
 	Col.b = rgb.b;
-	SDL_SetRenderDrawColor(Renderer, Col.r, Col.g, Col.b, 0xFF);
+	SDL_SetRenderDrawColor(*Renderer, Col.r, Col.g, Col.b, 0xFF);
 }
 
 void GRAPHICS_GEOMETRY_SDL::SetAlphaNorm(uint8_t a)
@@ -1196,13 +1500,18 @@ void GRAPHICS_GEOMETRY_SDL::SetAlphaOne(void)
 
 void GRAPHICS_GEOMETRY_SDL::DrawLine(int x1, int y1, int x2, int y2)
 {
-	SDL_RenderDrawLine(Renderer, x1, y1, x2, y2);
+	SDL_RenderLine(*Renderer, x1, y1, x2, y2);
 }
 
 void GRAPHICS_GEOMETRY_SDL::DrawBox(int x1, int y1, int x2, int y2)
 {
-	const SDL_Rect rect = { .x = x1, .y = y1, .w = (x2 - x1), .h = (y2 - y1) };
-	SDL_RenderFillRect(Renderer, &rect);
+	const SDL_FRect rect = {
+		.x = static_cast<float>(x1),
+		.y = static_cast<float>(y1),
+		.w = static_cast<float>(x2 - x1),
+		.h = static_cast<float>(y2 - y1),
+	};
+	SDL_RenderFillRect(*Renderer, &rect);
 }
 
 void GRAPHICS_GEOMETRY_SDL::DrawBoxA(int x1, int y1, int x2, int y2)
@@ -1218,7 +1527,7 @@ void GRAPHICS_GEOMETRY_SDL::DrawTriangleFan(VERTEX_XY_SPAN<> xys)
 void GRAPHICS_GEOMETRY_SDL::DrawLineStrip(VERTEX_XY_SPAN<> xys)
 {
 	const auto points = HelpFPointsFrom(xys);
-	SDL_RenderDrawLinesF(Renderer, points.data(), points.size());
+	SDL_RenderLines(*Renderer, points.data(), points.size());
 }
 
 void GRAPHICS_GEOMETRY_SDL::DrawTriangles(
@@ -1226,7 +1535,7 @@ void GRAPHICS_GEOMETRY_SDL::DrawTriangles(
 )
 {
 	if(colors.empty()) {
-		const RGBA single = { .r = Col.r, .g = Col.g, .b = Col.b, .a = 0xFF };
+		const VERTEX_RGBA single = { Col.r, Col.g, Col.b, 0xFF };
 		DrawGeometry(tp, xys, std::span(&single, 1));
 	} else {
 		DrawGeometry(tp, xys, colors);
@@ -1238,7 +1547,12 @@ void GRAPHICS_GEOMETRY_SDL::DrawTrianglesA(
 )
 {
 	DrawWithAlpha([&] {
-		DrawGeometry(tp, xys, (colors.empty() ? std::span(&Col, 1) : colors));
+		if(colors.empty()) {
+			const VERTEX_RGBA single = { Col.r, Col.g, Col.b, Col.a };
+			DrawGeometry(tp, xys, std::span(&single, 1));
+		} else {
+			DrawGeometry(tp, xys, colors);
+		}
 	});
 }
 
@@ -1252,7 +1566,7 @@ void GRAPHICS_GEOMETRY_SDL::DrawGrdLineEx(int x, int y1, RGB c1, int y2, RGB c2)
 		{ static_cast<VERTEX_COORD>(x + 1), static_cast<VERTEX_COORD>(y1) },
 		{ static_cast<VERTEX_COORD>(x + 1), static_cast<VERTEX_COORD>(y2) },
 	};
-	const RGBA colors[4] = { c1a, c2a, c1a, c2a };
+	const VERTEX_RGBA colors[4] = { c1a, c2a, c1a, c2a };
 	DrawGeometry(TRIANGLE_PRIMITIVE::STRIP, xys, colors);
 }
 
@@ -1263,28 +1577,39 @@ void GRAPHICS_GEOMETRY_SDL::DrawHLine(int, int, int) {}
 /// Software rendering with pixel access
 /// ------------------------------------
 
-bool GrpBackend_PixelAccessStart(void)
+static SDL_Texture *EnsureSoftwareTexture(void)
 {
-	if(SoftwareRenderer) {
-		return true;
+	if(SoftwareTexture) {
+		return SoftwareTexture;
 	}
-	SoftwareTexture = HelpCreateTexture(
-		SoftwareSurface->format->format,
+	SoftwareTexture = SDL_CreateTexture(
+		PrimaryRenderer,
+		HelpFormatFrom(SoftwareSurface),
 		SDL_TEXTUREACCESS_STREAMING,
 		SoftwareSurface->w,
 		SoftwareSurface->h
 	);
 	if(!SoftwareTexture) {
 		Log_Fail(LOG_CAT, "Error creating software rendering texture");
-		return DestroySoftwareRenderer();
+		DestroySoftwareRenderer();
+		return nullptr;
+	}
+	TexturePostInit(*SoftwareTexture, PrimaryRenderer);
+	return SoftwareTexture;
+}
+
+bool GrpBackend_PixelAccessStart(void)
+{
+	if(SoftwareRenderer) {
+		return true;
 	}
 	SoftwareRenderer = SDL_CreateSoftwareRenderer(SoftwareSurface);
 	if(!SoftwareRenderer) {
 		Log_Fail(LOG_CAT, "Error creating software renderer");
 		return DestroySoftwareRenderer();
 	}
-	SwitchActiveRenderer(SoftwareRenderer);
-	return true;
+	SwitchActiveRenderer(&SoftwareRenderer);
+	return (EnsureSoftwareTexture() != nullptr);
 }
 
 bool GrpBackend_PixelAccessEnd(void)
@@ -1292,15 +1617,18 @@ bool GrpBackend_PixelAccessEnd(void)
 	if(!SoftwareRenderer) {
 		return true;
 	}
-	SwitchActiveRenderer(PrimaryRenderer);
+	SwitchActiveRenderer(&PrimaryRenderer);
 	DestroySoftwareRenderer();
 	return true;
 }
 
 std::tuple<std::byte *, size_t> GrpBackend_PixelAccessLock(void)
 {
+	// Necessary in SDL 3!
+	SDL_FlushRenderer(SoftwareRenderer);
+
 	if(SDL_MUSTLOCK(SoftwareSurface)) {
-		if(SDL_LockSurface(SoftwareSurface) != 0) {
+		if(HelpFailed(SDL_LockSurface(SoftwareSurface))) {
 			Log_Fail(LOG_CAT, "Error locking CPU backbuffer");
 			return { nullptr, 0 };
 		}

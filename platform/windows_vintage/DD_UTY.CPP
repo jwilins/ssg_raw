@@ -6,6 +6,7 @@
 #include "DD_UTY.H"
 #include "game/cast.h"
 #include "game/debug.h"
+#include "game/defer.h"
 #include "game/enum_array.h"
 #include "game/format_bmp.h"
 #include "game/input.h"
@@ -20,13 +21,13 @@
 #pragma comment(lib, "user32.lib")
 
 #if   DIRECTDRAW_VERSION == 0x0700
-	#pragma message("      DirectDraw  : Version 7.00")
+#pragma message("      DirectDraw  : Version 7.00")
 #elif DIRECTDRAW_VERSION == 0x0600
-	#pragma message("      DirectDraw  : Version 6.00")
+#pragma message("      DirectDraw  : Version 6.00")
 #elif DIRECTDRAW_VERSION == 0x0500
-	#pragma message("      DirectDraw  : Version 5.00")
+#pragma message("      DirectDraw  : Version 5.00")
 #elif DIRECTDRAW_VERSION == 0x0300
-	#pragma message("      DirectDraw  : Version 3.00")
+#pragma message("      DirectDraw  : Version 3.00")
 #endif
 
 
@@ -130,6 +131,44 @@ ENUMARRAY<SURFACE_DDRAW, SURFACE_ID> DxSurf;
 // 図形描画用関数ポインタの実体 //
 bool (*GrpBlt)(const PIXEL_LTRB&, int, int, SURFACE_DDRAW&) = STD_GrpBlt;
 
+std::optional<PIXELFORMAT> HelpPixelFormatFrom(const DDPIXELFORMAT& ddpf)
+{
+	if(ddpf.dwFlags & DDPF_PALETTEINDEXED8) {
+		return PIXELFORMAT{ PIXELFORMAT::PALETTE8 };
+	}
+	if(ddpf.dwFlags & DDPF_RGB) {
+		if(ddpf.dwRGBBitCount == 16) {
+			if(
+				(ddpf.dwRBitMask == 0x7C00) &&
+				(ddpf.dwGBitMask == 0x03E0) &&
+				(ddpf.dwBBitMask == 0x001F) &&
+				(ddpf.dwRGBAlphaBitMask == 0x8000)
+			) {
+				return PIXELFORMAT{ PIXELFORMAT::ARGB1555_LE16 };
+			} else if(
+				(ddpf.dwRBitMask == 0xF800) &&
+				(ddpf.dwGBitMask == 0x07E0) &&
+				(ddpf.dwBBitMask == 0x001F)
+			) {
+				return PIXELFORMAT{ PIXELFORMAT::RGB565_LE16 };
+			}
+		} else if(ddpf.dwRGBBitCount == 32) {
+			if(
+				(ddpf.dwRBitMask == 0x00FF0000) &&
+				(ddpf.dwGBitMask == 0x0000FF00) &&
+				(ddpf.dwBBitMask == 0x000000FF)
+			) {
+				if(ddpf.dwRGBAlphaBitMask == 0xFF000000) {
+					return PIXELFORMAT{ PIXELFORMAT::BGRA8888 };
+				} else if(ddpf.dwRGBAlphaBitMask == 0) {
+					return PIXELFORMAT{ PIXELFORMAT::BGRX8888 };
+				}
+			}
+		}
+	}
+	return std::nullopt;
+}
+
 // Templating the functor avoids both the need for #including <functional> and
 // any potential runtime exceptions related to the call.
 void DDrawRetryUntilSuccessful(GRAPHICS_DDRAW& dxobj, auto action)
@@ -150,11 +189,12 @@ void DDrawRetryUntilSuccessful(GRAPHICS_DDRAW& dxobj, auto action)
 	}
 }
 
-bool DDrawSaveSurface(FILE_STREAM_WRITE* stream, IDirectDrawSurface* surf)
+bool DDrawSaveScreenshot(IDirectDrawSurface *surf)
 {
-	if(!surf || !stream) {
+	if(!surf) {
 		return false;
 	}
+	const auto t_start = std::chrono::steady_clock::now();
 	std::array<BGRA, BMP_PALETTE_SIZE_MAX> bgra_memory;
 	const auto palette = [surf, &bgra_memory]() -> std::span<BGRA> {
 		IDirectDrawPalette* pal = nullptr;
@@ -184,23 +224,41 @@ bool DDrawSaveSurface(FILE_STREAM_WRITE* stream, IDirectDrawSurface* surf)
 		assert(!"Negative pitch?");
 		return false;
 	}
+	defer(surf->Unlock(nullptr));
+	if(!desc.lpSurface) {
+		return false;
+	}
 
 	const uint16_t bpp = desc.ddpfPixelFormat.dwRGBBitCount;
-	const PIXEL_SIZE size = {
+	const PIXEL_SIZE_BASE<unsigned int> size = {
 		// The rows of DirectDraw surfaces tend to be aligned to larger
 		// boundaries than the DWORD alignment of .BMP files. Let's just round
 		// up the .BMP width to that stride so that we can directly write the
 		// surface memory in a single block, without trimming the rows.
-		static_cast<int32_t>(desc.lPitch / (bpp / 8)),
-		-static_cast<int32_t>(desc.dwHeight)
+		.w = static_cast<unsigned int>(desc.lPitch / (bpp / 8)),
+		.h = desc.dwHeight,
 	};
 	const std::span<const std::byte> pixels = {
 		static_cast<const std::byte *>(desc.lpSurface),
 		static_cast<size_t>(desc.lPitch * desc.dwHeight),
 	};
-	const auto ret = BMPSave(stream, size, 1, bpp, palette, pixels);
-	surf->Unlock(nullptr);
-	return ret;
+	const auto maybe_format = HelpPixelFormatFrom(desc.ddpfPixelFormat);
+	if(!maybe_format) {
+		DebugOut(u8"Backbuffer format not supported for screenshots");
+		return false;
+	}
+
+	// DxWnd might return BGRA8888 in 32-bit mode but leave the alpha channel
+	// mostly at 0x00 (except for the Direct3D-rendered parts, which receive a
+	// value lower than 0xFF). Checking the alpha value at (0, 0) should be
+	// enough to detect this.
+	auto format = maybe_format.value();
+	const auto *first_pixel = static_cast<const BGRA *>(desc.lpSurface);
+	if((format.format == PIXELFORMAT::BGRA8888) && (first_pixel->a != 0xFF)) {
+		format = { PIXELFORMAT::BGRX8888 };
+	}
+
+	return Grp_ScreenshotSave(size, format, palette, pixels, t_start);
 }
 
 
@@ -272,13 +330,16 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 		// mode while keeping [params] as is. This allows frictionless
 		// switching between this graphics backend and the SDL one.
 		using F = GRAPHICS_PARAM_FLAGS;
-		hWndMain = WndBackend_Win32Create({
+		if(!WndBackend_Create({
 			.flags = (F::FULLSCREEN | F::FULLSCREEN_EXCLUSIVE),
 			.api = -1,
 			.window_scale_4x = 4,
 			.left = 0,
 			.top = 0,
-		});
+		})) {
+			return std::nullopt;
+		}
+		hWndMain = WndBackend_Win32();
 	}
 	if(hWndMain == nullptr) {
 		return GRAPHICS_INIT_RESULT::From(maybe_prev);
@@ -293,12 +354,6 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 			return GRAPHICS_INIT_RESULT::From(maybe_prev);
 		}
 	}
-
-	const auto maybe_pixel_format = params.bitdepth.pixel_format();
-	if(!maybe_pixel_format) {
-		return GRAPHICS_INIT_RESULT::From(maybe_prev);
-	}
-	const auto pixel_format = maybe_pixel_format.value();
 
 	// Only re-init if any of our supported parameters changed.
 	if(maybe_prev) {
@@ -350,9 +405,22 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 		dxret = DxObj.Prim->GetAttachedSurface(&ddscaps, &DxObj.Back);
 		if(dxret!=DD_OK) throw("GetAttachedSurface に失敗");
 
+		// Get the exact pixel format //
+		DDPIXELFORMAT ddpf = { .dwSize = sizeof(ddpf) };
+		dxret = DxObj.Prim->GetPixelFormat(&ddpf);
+		if(dxret != DD_OK) {
+			throw("Failed to retrieve pixel format");
+		}
+		const auto maybe_pixel_format = HelpPixelFormatFrom(ddpf);
+		if(!maybe_pixel_format) {
+			throw("Unsupported pixel format");
+		}
+		DxObj.PixelFormat = maybe_pixel_format.value();
+
 		// 2Dの初期化はここでおしまい //
-		DxObj.PixelFormat = pixel_format;
-		if(pixel_format.IsPalettized()) throw(true);
+		if(DxObj.PixelFormat.IsPalettized()) {
+			throw(true);
+		}
 
 		// Direct3D Object の取得 //
 		auto** d3d_ptr = reinterpret_cast<void **>(&DxObj.D3);
@@ -390,7 +458,7 @@ std::optional<GRAPHICS_INIT_RESULT> GrpBackend_Init(
 		return std::nullopt;
 	}
 	catch(const bool) {
-		if(pixel_format.IsPalettized()) {
+		if(DxObj.PixelFormat.IsPalettized()) {
 			GrpGeom = &GrpGeom_DDraw;
 			GrpGeom_DDraw.Setup();
 		} else {
@@ -523,6 +591,7 @@ bool GrpBackend_PaletteSet(const PALETTE& pal)
 		}
 	}
 	DxObj.Prim->SetPalette(DxObj.Pal);
+	DxObj.Back->SetPalette(DxObj.Pal); // Required for real 8-bit on Windows 9x!
 	DxObj.bNeedChgPal = TRUE;
 
 	DisableAlphaTable();
@@ -671,10 +740,10 @@ GRAPHICS_GEOMETRY_DDRAW *GrpGeom_FB(void)
 }
 
 
-void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream)
+void GrpBackend_Flip(bool take_screenshot)
 {
-	if(auto *stream = screenshot_stream.get()) {
-		DDrawSaveSurface(stream, DxObj.Back);
+	if(take_screenshot) {
+		DDrawSaveScreenshot(DxObj.Back);
 	}
 
 	if(Fullscreen) {
@@ -691,7 +760,6 @@ void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream)
 			return DxObj.Prim->Blt(nullptr, DxObj.Back, nullptr, 0, nullptr);
 		});
 	}
-	screenshot_stream.reset();
 }
 
 // クリッピングをかける
@@ -770,18 +838,18 @@ bool GRAPHICS_DDRAW::SurfaceSetColorKeyFromFirstPixel(SURFACE_DDRAW& surf)
 	}
 
 	// はじっこの色獲得＆カラーキー準備 //
-	const auto temp = std::visit([&ddsd](auto pixel) -> DWORD {
-		if(sizeof(decltype(pixel)) == 3) {
-			// これでいいのか？ //
-			const auto *bytes = static_cast<uint8_t *>(ddsd.lpSurface);
-			return (
-				(Cast::up<DWORD>(bytes[0]) <<  0) +
-				(Cast::up<DWORD>(bytes[1]) <<  8) +
-				(Cast::up<DWORD>(bytes[2]) << 16)
-			);
-		}
-		return *static_cast<decltype(pixel) *>(ddsd.lpSurface);
-	}, PixelFormat);
+	DWORD temp = 0;
+	switch(PixelFormat.PixelSize()) {
+	case PIXELFORMAT::SIZE8:
+		temp = *static_cast<uint8_t *>(ddsd.lpSurface);
+		break;
+	case PIXELFORMAT::SIZE16:
+		temp = *static_cast<uint16_t *>(ddsd.lpSurface);
+		break;
+	case PIXELFORMAT::SIZE32:
+		temp = *static_cast<uint32_t *>(ddsd.lpSurface);
+		break;
+	}
 
 	// Unlock する //
 	const auto dxval = surf.surf->Unlock(nullptr);

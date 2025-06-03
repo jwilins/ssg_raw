@@ -34,21 +34,21 @@ BOOL	bMouseVisible;
 DWORD	WaitTime;
 
 
-HWND WndBackend_Win32Create(const GRAPHICS_PARAMS&)
+std::optional<GRAPHICS_PARAMS> WndBackend_Create(GRAPHICS_PARAMS params)
 {
 	// 他のところで起動していたらそいつをRestoreする //
 	auto old_gian = FindWindowW(APP_CLASS, nullptr);
 	if(old_gian) {
 		SetForegroundWindow(old_gian);
 		SendMessageW(old_gian,WM_SYSCOMMAND,SC_RESTORE,0);
-		return nullptr;
+		return std::nullopt;
 	}
 
 	if(!AppInit(GetModuleHandle(nullptr), 0)){
-		return nullptr;
+		return std::nullopt;
 	}
 
-	return hWndMain;
+	return params;
 }
 
 HWND WndBackend_Win32(void)
@@ -143,9 +143,9 @@ long FAR __stdcall WndProc(HWND hWnd,UINT message,WPARAM wParam,LPARAM lParam)
 		case WM_IME_KEYUP:		case WM_IME_NOTIFY:				case WM_IME_SELECT:
 		case WM_IME_SETCONTEXT:	case WM_IME_STARTCOMPOSITION:
 
-		#if(WINVER >= 0x0500)
-			case WM_IME_REQUEST:
-		#endif
+#if(WINVER >= 0x0500)
+		case WM_IME_REQUEST:
+#endif
 
 		return 1;
 

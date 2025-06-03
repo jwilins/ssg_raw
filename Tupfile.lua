@@ -1,6 +1,6 @@
 tup.include("libs/tupblocks/Tuprules.lua")
 
----@class ConfigShape
+---@type ConfigShape
 SSG_COMPILE = {}
 SSG_COMPILE.cflags = { "-I.", "-IGIAN07/", debug = "-DPBG_DEBUG" }
 SSG_COMPILE.objdir = "ssg/"
@@ -8,7 +8,7 @@ SSG_COMPILE.objdir = "ssg/"
 SSG = sourcepath("./")
 
 PLATFORM_CONSTANTS = EnvHeader(SSG.join("obj/platform_constants.h"), {
-	"APP_NAME", "PATH_SKELETON"
+	"APP_ID", "PATH_SKELETON"
 })
 
 -- pbg code

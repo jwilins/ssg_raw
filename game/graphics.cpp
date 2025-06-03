@@ -4,12 +4,18 @@
  */
 
 #include "game/graphics.h"
+#include "game/defer.h"
+#include "game/format_bmp.h"
 #include "game/input.h"
 #include "game/string_format.h"
 #include "platform/file.h"
 #include "platform/graphics_backend.h"
+#include <webp/encode.h>
 
 uint8_t Grp_FPSDivisor = 0;
+std::chrono::steady_clock::duration Grp_ScreenshotTimes[
+	GRP_SCREENSHOT_EFFORT_COUNT
+];
 
 // Paletted graphics //
 // ----------------- //
@@ -49,24 +55,36 @@ void Grp_PaletteSetDefault(void)
 // -----------
 
 using NUM_TYPE = unsigned int;
-static constexpr std::u8string_view EXT = u8".BMP";
 
 static NUM_TYPE ScreenshotNum = 0;
 static std::u8string ScreenshotBuf;
+static std::filesystem::path ScreenshotPath;
 
-void Grp_SetScreenshotPrefix(std::u8string_view prefix)
+void Grp_ScreenshotSetPrefix(std::u8string_view prefix)
 {
-	const auto cap = (prefix.length() + STRING_NUM_CAP<NUM_TYPE> + EXT.size());
+	const auto cap = (prefix.length() + STRING_NUM_CAP<NUM_TYPE> + 5);
 	ScreenshotBuf.resize_and_overwrite(cap, [&](auto *p, size_t) {
 		return (std::ranges::copy(prefix, p).out - p);
 	});
+	ScreenshotPath = ScreenshotBuf;
+	ScreenshotPath.remove_filename();
 }
 
-// Increments the screenshot number to the next file that doesn't exist yet,
-// then opens a write stream for that file.
-std::unique_ptr<FILE_STREAM_WRITE> Grp_NextScreenshotStream()
+// Increments the screenshot number to the next file with the given extension
+// that doesn't exist yet, then opens a write stream for that file.
+std::unique_ptr<FILE_STREAM_WRITE> Grp_NextScreenshotStream(
+	std::u8string_view ext
+)
 {
 	if(ScreenshotBuf.size() == 0) {
+		return nullptr;
+	}
+
+	// Users might delete the directory while the game is running, after all.
+	std::error_code ec;
+	std::filesystem::create_directory(ScreenshotPath, ec);
+	if(ec) {
+		ScreenshotBuf.clear();
 		return nullptr;
 	}
 
@@ -74,14 +92,163 @@ std::unique_ptr<FILE_STREAM_WRITE> Grp_NextScreenshotStream()
 	while(ScreenshotNum < (std::numeric_limits<NUM_TYPE>::max)()) {
 		const auto prefix_len = ScreenshotBuf.size();
 		StringCatNum<4>(ScreenshotNum++, ScreenshotBuf);
-		ScreenshotBuf += EXT;
-		auto ret = FileStreamWrite(ScreenshotBuf.c_str(), true);
+		ScreenshotBuf += ext;
+		auto ret = FileStreamWrite(
+			ScreenshotBuf.c_str(), FILE_FLAGS::FAIL_IF_EXISTS
+		);
 		ScreenshotBuf.resize(prefix_len);
 		if(ret) {
 			return ret;
 		}
 	}
 	return nullptr;
+}
+
+static bool ScreenshotSaveBMP(
+	PIXEL_SIZE_BASE<unsigned int> size,
+	PIXELFORMAT format,
+	std::span<BGRA> palette,
+	std::span<const std::byte> pixels
+)
+{
+	if(!BMPSaveSupports(format)) {
+		assert(!"Unsupported pixel format?");
+		return false;
+	}
+	assert(size.w < std::numeric_limits<PIXEL_COORD>::max());
+	assert(size.h < std::numeric_limits<PIXEL_COORD>::max());
+	const PIXEL_SIZE bmp_size = {
+		.w = Cast::sign<PIXEL_COORD>(size.w),
+		.h = -Cast::sign<PIXEL_COORD>(size.h),
+	};
+	const auto stream = Grp_NextScreenshotStream(u8".BMP");
+	if(!stream) {
+		return false;
+	}
+	const auto bpp = (format.PixelByteSize() * 8);
+	return BMPSave(stream.get(), bmp_size, 1, bpp, palette, pixels);
+}
+
+static bool ScreenshotSaveWebP(
+	PIXEL_SIZE_BASE<unsigned int> size,
+	PIXELFORMAT format,
+	std::span<BGRA> palette,
+	std::span<const std::byte> pixels,
+	int z
+)
+{
+	if((size.w > WEBP_MAX_DIMENSION) || (size.h > WEBP_MAX_DIMENSION)) {
+		return false;
+	}
+
+	WebPPicture pic;
+	if(!WebPPictureInit(&pic)) {
+		return false;
+	}
+	defer(WebPPictureFree(&pic));
+
+	pic.width = size.w;
+	pic.height = size.h;
+	pic.argb_stride = size.w;
+
+	// Must also be set to opt into lossless import!
+	pic.use_argb = true;
+
+	decltype(WebPPictureImportRGBX) *import_func_32bpp = nullptr;
+	switch(format.format) {
+	case PIXELFORMAT::BGRA8888:
+		// Yup, "argb" is little-endian and this is actually BGRA...
+		pic.argb = std::bit_cast<uint32_t *>(pixels.data());
+		break;
+	case PIXELFORMAT::BGRX8888:
+		// … but these are big-endian!
+		import_func_32bpp = WebPPictureImportBGRX;
+		break;
+	case PIXELFORMAT::RGBA8888:
+		import_func_32bpp = WebPPictureImportRGBA;
+		break;
+	case PIXELFORMAT::PALETTE8:
+		// The WebP repo has equivalent code in WebPImportColorMappedARGB(),
+		// but Linux distributions typically don't package the `extras` module
+		// this function belongs to.
+		assert(palette.size() == (sizeof(uint8_t) << 8));
+		if(!WebPPictureAlloc(&pic)) {
+			return false;
+		}
+		{
+			auto *src_p = std::bit_cast<uint8_t *>(pixels.data());
+			auto *dst_p = pic.argb;
+			for(const auto y : std::views::iota(0, pic.height)) {
+				for(const auto x : std::views::iota(0, pic.width)) {
+					const auto c = U32LEAt(&palette[src_p[x]]);
+					dst_p[x] = (c | 0xFF000000u);
+				}
+				src_p += size.w;
+				dst_p += pic.argb_stride;
+			}
+		}
+		break;
+	default:
+		return false;
+	}
+	if(import_func_32bpp) {
+		const auto *bytes = std::bit_cast<uint8_t *>(pixels.data());
+		if(!import_func_32bpp(&pic, bytes, (size.w * sizeof(uint32_t)))) {
+			return false;
+		}
+	}
+
+	WebPConfig config;
+	if(!WebPConfigInit(&config)) {
+		return false;
+	}
+	if(!WebPConfigLosslessPreset(&config, z)) {
+		return false;
+	}
+	config.thread_level = 1;
+
+	WebPMemoryWriter wrt;
+	WebPMemoryWriterInit(&wrt);
+	defer(WebPMemoryWriterClear(&wrt));
+	pic.writer = WebPMemoryWrite;
+	pic.custom_ptr = &wrt;
+
+	const auto ret = WebPEncode(&config, &pic);
+	if(!ret) {
+		return false;
+	}
+	const auto stream = Grp_NextScreenshotStream(u8".webp");
+	if(!stream) {
+		return false;
+	}
+	return stream->Write({ wrt.mem, wrt.size });
+}
+
+bool Grp_ScreenshotSave(
+	PIXEL_SIZE_BASE<unsigned int> size,
+	PIXELFORMAT format,
+	std::span<BGRA> palette,
+	std::span<const std::byte> pixels,
+	const std::chrono::steady_clock::time_point t_start
+)
+{
+	constexpr auto DURATION_FAILED = std::chrono::steady_clock::duration(-1);
+
+	auto ret = false;
+	auto effort = Grp_ScreenshotEffort;
+	if(effort != 0) {
+		ret = ScreenshotSaveWebP(size, format, palette, pixels, (effort - 1));
+		if(!ret) {
+			Grp_ScreenshotTimes[effort] = DURATION_FAILED;
+		}
+	}
+	if(!ret) {
+		effort = 0;
+		ret = ScreenshotSaveBMP(size, format, palette, pixels);
+	}
+	const auto t_end = std::chrono::steady_clock::now();
+	Grp_ScreenshotTimes[effort] = (ret ? (t_end - t_start) : DURATION_FAILED);
+	return ret;
 }
 // -----------
 
@@ -203,8 +370,5 @@ std::optional<GRAPHICS_INIT_RESULT> Grp_InitOrFallback(GRAPHICS_PARAMS params)
 
 void Grp_Flip(void)
 {
-	GrpBackend_Flip((SystemKey_Data & SYSKEY_SNAPSHOT)
-		? Grp_NextScreenshotStream()
-		: nullptr
-	);
+	GrpBackend_Flip((SystemKey_Data & SYSKEY_SNAPSHOT) && ScreenshotBuf.size());
 }

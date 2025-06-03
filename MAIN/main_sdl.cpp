@@ -18,13 +18,21 @@
 )
 #endif
 
+#ifdef SDL3
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#else
 #include <SDL.h>
+#endif
+#include "platform/sdl/sdl2_wrap.h"
+
 #include "GIAN07/ENTRY.H"
 #include "platform/window_backend.h"
 #include "platform/sdl/log_sdl.h"
 #include "game/defer.h"
 #include "strings/title.h"
 #include "obj/platform_constants.h"
+#include "obj/version.h"
 
 #define UTF8_(S) u8 ## S
 #define UTF8(S) UTF8_(S)
@@ -33,25 +41,32 @@ int main(int argc, char** args)
 {
 	Log_Init(UTF8(GAME_TITLE));
 
-	#if(defined(LINUX) && defined(APP_NAME))
-		// Tell the Desktop Entry name to the X11 (or Wayland!) window manager,
-		// and hope that it uses this name to pick the Desktop Entry's icon.
-		//
-		// SDL_SetWindowIcon() only allows sending a single icon, which is the
-		// wrong approach if you have multiple lovingly hand-crafted variants
-		// of your icon at different resolutions. It should be the WM's job to
-		// pick the closest available version because we can't possibly know
-		// how many pixels it allotted for the icon. SDL_GetWindowBordersSize()
-		// is a hack at best because it only tells us the total size of the
-		// decorations, not the intended icon size. What should we do if we
-		// have a 16-pixel and a 32-pixel icon but get a decoration size of 22?
-		//
-		/// (Also, SDL_WindowIcon() still works this way even in SDL 3 where
-		// `SDL_Surface` gained support for alternate-resolution images.)
-		SDL_setenv("SDL_VIDEO_X11_WMCLASS", APP_NAME, 1);
-	#endif
+#ifdef SDL3
+#ifndef APP_ID
+#define APP_ID "GIAN07"
+#endif
+	// SDL 3 automatically pulls the Desktop Entry name from the new app
+	// metadata, avoiding the need for the environment variable below.
+	SDL_SetAppMetadata(GAME_TITLE, VERSION_TAG, APP_ID);
+#elif (defined(LINUX) && defined(APP_ID))
+	// Tell the Desktop Entry name to the X11 (or Wayland!) window manager, and
+	// hope that it uses this name to pick the Desktop Entry's icon.
+	//
+	// SDL_SetWindowIcon() only allows sending a single icon, which is the
+	// wrong approach if you have multiple lovingly hand-crafted variants of
+	// your icon at different resolutions. It should be the WM's job to pick
+	// the closest available version because we can't possibly know how many
+	// pixels it allotted for the icon. SDL_GetWindowBordersSize() is a hack at
+	// best because it only tells us the total size of the decorations, not the
+	// intended icon size. What should we do if we have a 16-pixel and a
+	// 32-pixel icon but get a decoration size of 22?
+	//
+	/// (Also, SDL_WindowIcon() still works this way even in SDL 3 where
+	// `SDL_Surface` gained support for alternate-resolution images.)
+	SDL_setenv("SDL_VIDEO_X11_WMCLASS", APP_ID, 1);
+#endif
 
-	if(SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_TIMER | SDL_INIT_VIDEO) < 0) {
+	if(HelpFailed(SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_VIDEO))) {
 		Log_Fail(SDL_LOG_CATEGORY_VIDEO, "Error initializing SDL");
 		return 1;
 	}
@@ -63,7 +78,7 @@ int main(int argc, char** args)
 	// level during SDL_VideoInit() that might confuse Linux users, but we'd
 	// like this log level for everything we call ourselves. So let's only
 	// activate it after SDL_Init().
-	SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+	SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
 
 	// Use the backend API's line drawing algorithm, which at least gives us
 	// pixel-perfect accuracy with pbg's original 16-bit code when using
@@ -81,16 +96,6 @@ int main(int argc, char** args)
 	//
 	// 	https://github.com/nmlgc/ssg/issues/74
 	SDL_SetHint(SDL_HINT_RENDER_LINE_METHOD, "2");
-
-	// OpenGL is either *the* best or close to the best choice everywhere when
-	// it comes to performance (at least as long as we don't batch draw calls):
-	//
-	// 	https://rec98.nmlgc.net/blog/2024-10-22#benchmark-2024-10-22
-	//
-	// Yes, this means that players have to manually pick any of the Direct3D
-	// APIs to get accurate line drawing, but great performance on everything
-	// out of the box is more important.
-	SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
 
 	if(!XInit()) {
 		// This is not a SDL error.

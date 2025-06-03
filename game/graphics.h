@@ -22,17 +22,6 @@ extern uint8_t Grp_FPSDivisor;
 // Paletted graphics //
 // ----------------- //
 
-// RGBA color structure, identical to Win32 GDI's PALETTEENTRY.
-struct RGBA {
-	uint8_t r;
-	uint8_t g;
-	uint8_t b;
-	uint8_t a;
-
-	constexpr bool operator==(const RGBA& other) const = default;
-};
-static_assert(sizeof(RGBA) == 4);
-
 struct RGB {
 	uint8_t r;
 	uint8_t g;
@@ -118,8 +107,37 @@ struct RGB216 {
 void Grp_PaletteSetDefault(void);
 // ----------------- //
 
+// Screenshots
+// -----------
+
+struct BGRA;
+struct FILE_STREAM_WRITE;
+
+// 0 = BMP, 10 = max-effort WebP.
+constexpr uint8_t GRP_SCREENSHOT_EFFORT_COUNT = 11;
+constexpr uint8_t GRP_SCREENSHOT_EFFORT_MAX = (GRP_SCREENSHOT_EFFORT_COUNT - 1);
+
+extern const uint8_t& Grp_ScreenshotEffort;
+
+// 0 = not yet tried, -1 = last attempt failed.
+extern std::chrono::steady_clock::duration Grp_ScreenshotTimes[
+	GRP_SCREENSHOT_EFFORT_COUNT
+];
+
 // Required to enable the screenshot feature as a whole.
-void Grp_SetScreenshotPrefix(std::u8string_view prefix);
+void Grp_ScreenshotSetPrefix(std::u8string_view prefix);
+
+// Saves the given bitmap in the screenshot format to a file with the
+// screenshot prefix. [t_start] represents the very beginning of the backend's
+// capturing process.
+bool Grp_ScreenshotSave(
+	PIXEL_SIZE_BASE<unsigned int> size,
+	PIXELFORMAT format,
+	std::span<BGRA> palette,
+	std::span<const std::byte> pixels,
+	const std::chrono::steady_clock::time_point t_start
+);
+// -----------
 
 enum class GRAPHICS_FULLSCREEN_FIT : uint8_t {
 	// Scale to largest integer resolution

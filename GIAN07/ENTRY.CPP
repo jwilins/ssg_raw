@@ -18,6 +18,17 @@
 #include "game/input.h"
 #include "game/snd.h"
 #include "obj/platform_constants.h"
+#if (defined(WIN32) && !defined(WIN32_VINTAGE))
+extern "C" __declspec(dllimport) int __stdcall DeleteFileW(
+	const wchar_t *lpFileName
+);
+#endif
+
+// Screenshots
+// -----------
+
+const uint8_t& Grp_ScreenshotEffort = ConfigDat.ScreenshotEffort.v;
+// -----------
 
 // Volume controls
 // ---------------
@@ -49,21 +60,70 @@ std::span<const INPUT_PAD_BINDING> Key_PadBindings = PadBindings;
 
 bool XInit(void)
 {
-	std::filesystem::current_path(PathForData());
+	const auto path_data = PathForData();
+	std::error_code ec;
+	std::filesystem::current_path(path_data, ec);
+	if(ec) {
+		return false;
+	}
 
-	#ifdef WIN32
-		// User data and game data directories are one and the same on Windows,
-		// and we already ship with the skeleton in place.
-	#elif !defined(PATH_SKELETON)
-		#pragma message("No user data skeleton directory defined. This does not matter for development builds, but package builds should set the environment variable `PATH_SKELETON` accordingly.")
-	#else
-		using copy_opts = std::filesystem::copy_options;
+#ifdef WIN32
+	// User data and game data directories are one and the same on Windows,
+	// and we already ship with the skeleton in place.
+	// The release archive might have added some 0-byte binaries that we need
+	// to get rid of, though.
+	const auto remove_0_byte_binaries = ([&] {
+		constexpr PATH_STRING_VIEW EXE = _PATH(".exe");
+		constexpr PATH_STRING_VIEW DLL = _PATH(".dll");
+		const auto ext_equal = [](PATH_CODEUNIT a, PATH_CODEUNIT b) {
+			return (tolower(a) == tolower(b));
+		};
 
-		auto path_data = PathForData();
-		std::error_code ec;
-		const auto opts = (copy_opts::skip_existing | copy_opts::recursive);
-		std::filesystem::copy(PATH_SKELETON, PathForData(), opts, ec);
-	#endif
+		const auto opts = (
+			std::filesystem::directory_options::skip_permission_denied
+		);
+		std::filesystem::directory_iterator bin(path_data, opts, ec);
+		if(ec) {
+			return false;
+		}
+		for(const auto& d : bin) {
+			const auto is_regular = d.is_regular_file(ec);
+			if(ec || !is_regular) {
+				continue;
+			}
+			const auto size = d.file_size(ec);
+			if(ec || (size != 0)) {
+				continue;
+			}
+			const auto path = d.path();
+			const auto ext_p = path.extension();
+			const PATH_STRING_VIEW ext = ext_p.native();
+			if(
+				!std::ranges::equal(ext, EXE, ext_equal) &&
+				!std::ranges::equal(ext, DLL, ext_equal)
+			) {
+				continue;
+			}
+			// std::filesystem::remove() implements potentially delayed
+			// deletion through symlinks by using SetFileInformationByHandle()
+			// with `FILE_DISPOSITION_FLAG_DELETE`. That function is not
+			// available on Windows 9x or KernelEx, we don't need that level of
+			// certainty, and I'm planning to migrate file I/O to SDL anyway.
+			//
+			// TODO: Don't forget to remove the DeleteFileW() declaration at
+			// the top of the file.
+			DeleteFileW(path.c_str());
+		}
+		return true;
+	})();
+#elif !defined(PATH_SKELETON)
+	#pragma message("No user data skeleton directory defined. This does not matter for development builds, but package builds should set the environment variable `PATH_SKELETON` accordingly.")
+#else
+	using copy_opts = std::filesystem::copy_options;
+
+	const auto opts = (copy_opts::skip_existing | copy_opts::recursive);
+	std::filesystem::copy(PATH_SKELETON, path_data, opts, ec);
+#endif
 
 	DebugSetup();
 
@@ -96,13 +156,14 @@ bool XInit(void)
 		ConfigDat.BGMPack.v.clear();
 	}
 	BGM_SetGainApply(!(ConfigDat.SoundFlags.v & SNDF_BGM_NOT_VOL_NORM));
-	Grp_SetScreenshotPrefix(u8"秋霜");
+	Grp_ScreenshotSetPrefix(u8"screenshots/");
 	LoaderInit();
 	return true;
 }
 
 void XCleanup(void)
 {
+	LoaderCleanup();
 	ConfigSave();
 	TextBackend_Cleanup();
 	GrpBackend_Cleanup();
@@ -177,22 +238,22 @@ void XGrpTryCycleScMode(void)
 
 bool GameFrame(void)
 {
-	#ifdef SUPPORT_GRP_WINDOWED
-		if(SystemKey_Data & SYSKEY_GRP_FULLSCREEN) {
-			XGrpTryCycleDisp();
-		}
-	#endif
-	#ifdef SUPPORT_GRP_SCALING
-		if(SystemKey_Data & SYSKEY_GRP_SCALE_UP) {
-			XGrpTryCycleScale(+1, false);
-		}
-		if(SystemKey_Data & SYSKEY_GRP_SCALE_DOWN) {
-			XGrpTryCycleScale(-1, false);
-		}
-		if(SystemKey_Data & SYSKEY_GRP_SCALE_MODE) {
-			XGrpTryCycleScMode();
-		}
-	#endif
+#ifdef SUPPORT_GRP_WINDOWED
+	if(SystemKey_Data & SYSKEY_GRP_FULLSCREEN) {
+		XGrpTryCycleDisp();
+	}
+#endif
+#ifdef SUPPORT_GRP_SCALING
+	if(SystemKey_Data & SYSKEY_GRP_SCALE_UP) {
+		XGrpTryCycleScale(+1, false);
+	}
+	if(SystemKey_Data & SYSKEY_GRP_SCALE_DOWN) {
+		XGrpTryCycleScale(-1, false);
+	}
+	if(SystemKey_Data & SYSKEY_GRP_SCALE_MODE) {
+		XGrpTryCycleScMode();
+	}
+#endif
 	if(SystemKey_Data & SYSKEY_GRP_TURBO) {
 		static decltype(Grp_FPSDivisor) fps_divisor_prev = (
 			(Grp_FPSDivisor != 0) ? Grp_FPSDivisor : 1
@@ -204,6 +265,13 @@ bool GameFrame(void)
 			ConfigDat.FPSDivisor.v = Grp_FPSDivisor = fps_divisor_prev;
 		}
 	}
+#ifdef SUPPORT_GRP_API
+	if(SystemKey_Data & SYSKEY_GRP_API) {
+		XGrpTry([](auto& params) {
+			params.api = ((params.api + 1) % GrpBackend_APICount());
+		});
+	}
+#endif
 
 	// Strictly superior to waiting [CWIN_KEYWAIT] frames: We won't get a key
 	// release scancode if we recreate the window on a switch into exclusive
@@ -213,7 +281,8 @@ bool GameFrame(void)
 		SYSKEY_GRP_SCALE_UP |
 		SYSKEY_GRP_SCALE_DOWN |
 		SYSKEY_GRP_SCALE_MODE |
-		SYSKEY_GRP_TURBO
+		SYSKEY_GRP_TURBO |
+		SYSKEY_GRP_API
 	);
 
 	bool quit = false;

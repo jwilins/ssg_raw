@@ -9,7 +9,7 @@
 
 // Concept for pixel access within a text rendering session. Offers access
 // using both RGB colors and the raw underlying format.
-template <class T> concept TEXTRENDER_SESSION_PIXELACCESS = requires(
+template <class T> concept TEXTRENDER_SESSION_PIXELACCESS_BASE = requires(
 	T t, PIXEL_POINT xy_rel, decltype(t.GetRaw(xy_rel)) color_raw, RGB color
 ) {
 	{ t.GetRaw(xy_rel) } -> std::same_as<decltype(color_raw)>;
@@ -20,10 +20,18 @@ template <class T> concept TEXTRENDER_SESSION_PIXELACCESS = requires(
 };
 
 #ifdef WIN32
-	#include "platform/windows/text_gdi.h"
+#include "platform/windows/text_gdi.h"
 #elif defined(LINUX)
-	#include "platform/pangocairo/text_pangocairo.h"
+#include "platform/pangocairo/text_pangocairo.h"
 #endif
+
+static_assert(
+	TEXTRENDER_SESSION_PIXELACCESS_BASE<TEXTRENDER_SESSION::PIXELACCESS>
+);
+static_assert(TEXTRENDER_SESSION_BASE<TEXTRENDER_SESSION>);
+static_assert(TEXTRENDER_BASE<TEXTRENDER>);
+
+extern TEXTRENDER TextObj;
 
 // Shuts down the backend, deleting all fonts.
 void TextBackend_Cleanup(void);

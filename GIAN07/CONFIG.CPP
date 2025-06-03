@@ -209,6 +209,7 @@ const struct VERSION_02 {
 		ConfigDat.WindowLeft,
 		ConfigDat.WindowTop,
 		ConfigDat.MidFlags,
+		ConfigDat.ScreenshotEffort,
 	};
 } VERSION_02;
 
@@ -264,7 +265,7 @@ void CONFIG_DATA::GraphicsParamsApply(const GRAPHICS_PARAMS& params)
 ///// [グローバル変数] /////
 CONFIG_DATA ConfigDat;
 #ifdef PBG_DEBUG
-	DEBUG_DATA DebugDat;
+DEBUG_DATA DebugDat;
 #endif
 
 #ifdef PBG_DEBUG

@@ -69,17 +69,18 @@ void GrpBackend_PaletteGet(PALETTE& pal);
 bool GrpBackend_PaletteSet(const PALETTE& pal);
 
 struct FILE_STREAM_WRITE;
-void GrpBackend_Flip(std::unique_ptr<FILE_STREAM_WRITE> screenshot_stream);
+void GrpBackend_Flip(bool take_screenshot);
 /// -------
 
 /// Surfaces
 /// --------
 struct BMP_OWNED;
 
-// (Re-)creates the texture in the given surface slot with the given size,
-// using the format indicated by GrpBackend_PixelFormat(), and with undefined
-// initial contents.
-bool GrpSurface_CreateUninitialized(SURFACE_ID sid, const PIXEL_SIZE& size);
+// (Re-)creates the texture in the given surface slot with the given size and
+// format, and with undefined initial contents.
+bool GrpSurface_CreateUninitialized(
+	SURFACE_ID sid, const PIXEL_SIZE& size, PIXELFORMAT format
+);
 
 // Consumes the given .BMP file and sets the given surface to its contents,
 // re-creating it in the correct size if necessary.
@@ -89,7 +90,7 @@ bool GrpSurface_PaletteApplyToBackend(SURFACE_ID sid);
 
 // Uploads [pixels] (consisting of a pointer and a row pitch) to a [subrect] of
 // [sid]. [subrect] can be a `nullptr` to overwrite the entire texture. The
-// [pixels] have to use the format indicated by GrpBackend_PixelFormat().
+// [pixels] have to match the surface's format.
 bool GrpSurface_Update(
 	SURFACE_ID sid,
 	const PIXEL_LTWH* subrect,
@@ -112,22 +113,22 @@ void GrpSurface_BlitOpaque(
 );
 
 #ifdef WIN32
-	// Win32 GDI text rendering bridge
-	// -------------------------------
-	class SURFACE_GDI;
+// Win32 GDI text rendering bridge
+// -------------------------------
+class SURFACE_GDI;
 
-	// Returns a reference to the backend's designated GDI text surface.
-	SURFACE_GDI& GrpSurface_GDIText_Surface(void) noexcept;
+// Returns a reference to the backend's designated GDI text surface.
+SURFACE_GDI& GrpSurface_GDIText_Surface(void) noexcept;
 
-	// (Re-)creates the backend's designated GDI text surface with the given
-	// size and undefined initial contents. [w] and [h] have already been
-	// validated to fit into the positive range of a signed 32-bit integer.
-	// After filling it with the intended pixels, call
-	// GrpSurface_GDIText_Update() to upload them to the backend.
-	bool GrpSurface_GDIText_Create(int32_t w, int32_t h, RGB colorkey);
+// (Re-)creates the backend's designated GDI text surface with the given size
+// and undefined initial contents. [w] and [h] have already been validated to
+// fit into the positive range of a signed 32-bit integer. After filling it
+// with the intended pixels, call GrpSurface_GDIText_Update() to upload them to
+// the backend.
+bool GrpSurface_GDIText_Create(int32_t w, int32_t h, RGB colorkey);
 
-	bool GrpSurface_GDIText_Update(const PIXEL_LTWH& r) noexcept;
-	// -------------------------------
+bool GrpSurface_GDIText_Update(const PIXEL_LTWH& r) noexcept;
+// -------------------------------
 #endif
 /// --------
 
@@ -138,12 +139,31 @@ void GrpSurface_BlitOpaque(
 // ------------
 
 #ifdef WIN32_VINTAGE
-	using VERTEX_COORD = WINDOW_COORD;
+using VERTEX_COORD = WINDOW_COORD;
 #else
-	using VERTEX_COORD = float;
+using VERTEX_COORD = float;
 #endif
+
 using VERTEX_XY = WINDOW_POINT_BASE<VERTEX_COORD>;
+
+#if (defined(SDL3) && !defined(WIN32_VINTAGE))
+struct VERTEX_RGBA {
+	float r;
+	float g;
+	float b;
+	float a;
+
+	VERTEX_RGBA() = default;
+	VERTEX_RGBA(uint8_t r, uint8_t g, uint8_t b, uint8_t a) :
+		r(r / 255.0f), g(g / 255.0f), b(b / 255.0f), a(a / 255.0f) {
+	}
+	VERTEX_RGBA(const RGBA& o) :
+		r(o.r / 255.0f), g(o.g / 255.0f), b(o.b / 255.0f), a(o.a / 255.0f) {
+	}
+};
+#else
 using VERTEX_RGBA = RGBA;
+#endif
 
 template <size_t N = std::dynamic_extent> using VERTEX_XY_SPAN = std::span<
 	const VERTEX_XY, N
@@ -275,16 +295,23 @@ void GrpBackend_PixelAccessEdit(auto func)
 	if(pitch == 0) {
 		return;
 	}
-	std::visit(
-		[&](auto P) { func.template operator()<decltype(P)>(pixels, pitch); },
-		GrpBackend_PixelFormat()
-	);
+	switch(GrpBackend_PixelFormat().PixelSize()) {
+	case PIXELFORMAT::SIZE8:
+		func.template operator()<uint8_t>(pixels, pitch);
+		break;
+	case PIXELFORMAT::SIZE16:
+		func.template operator()<uint16_t>(pixels, pitch);
+		break;
+	case PIXELFORMAT::SIZE32:
+		func.template operator()<uint32_t>(pixels, pitch);
+		break;
+	}
 	GrpBackend_PixelAccessUnlock();
 }
 /// ------------------------------------
 
 #ifdef WIN32_VINTAGE
-	#include "platform/windows_vintage/DD_UTY.H"
+#include "platform/windows_vintage/DD_UTY.H"
 #else
-	#include "platform/sdl/graphics_sdl.h"
+#include "platform/sdl/graphics_sdl.h"
 #endif

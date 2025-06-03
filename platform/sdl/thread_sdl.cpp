@@ -3,7 +3,12 @@
  *
  */
 
+#ifdef SDL3
+#include <SDL3/SDL_thread.h>
+#else
 #include <SDL_thread.h>
+#endif
+
 #include "platform/sdl/thread_sdl.h"
 
 THREAD::THREAD(SDL_Thread *sdl_thread, std::unique_ptr<THREAD_STOP> st) :
@@ -27,10 +32,7 @@ THREAD& THREAD::operator=(THREAD&& other) noexcept
 
 THREAD::~THREAD()
 {
-	if(st) {
-		st->store(true);
-	}
-	Join();
+	Abort();
 }
 
 SDL_Thread *HelpCreateThread(int(*fn)(void *), void *data)
@@ -49,4 +51,12 @@ void THREAD::Join() noexcept
 		SDL_WaitThread(sdl_thread, nullptr);
 		sdl_thread = nullptr;
 	}
+}
+
+void THREAD::Abort() noexcept
+{
+	if(st) {
+		st->store(true);
+	}
+	Join();
 }

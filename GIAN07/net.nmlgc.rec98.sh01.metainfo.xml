@@ -53,6 +53,25 @@
 	<content_rating type="oars-1.1" />
 
 	<releases>
+		<release version="P0310-1" date="2025-05-18">
+			<description>
+				<p>Fixed two replay-related bugs:</p><ul>
+					<li>Extra Stage replays recorded in ≥P0295 were highly likely to desync</li>
+					<li>≥P0217 saved twice as many replay frames as necessary</li>
+				</ul><p>
+					Watching an affected replay will now repair the desync and recompress the file. Marking the replay file as read-only bypasses both fixes.
+				</p>
+			</description>
+		</release>
+		<release version="P0309" date="2025-04-03">
+			<description><ul>
+				<li>Optional screenshot compression using lossless WebP, with a configurable size/speed tradeoff</li>
+				<li>Screenshots are now placed into a <code>screenshots/</code> subdirectory within the game data folder, without the <code>秋霜</code> prefix</li>
+				<li>Build tag in the bottom-right corner of the main menu</li>
+				<li>Fixed various window position bugs</li>
+				<li>Fixed vanishing Music Room and in-game music title text after using hotkeys</li>
+			</ul></description>
+		</release>
 		<release version="P0303-1" date="2025-01-23">
 			<description>
 				<p>Fixed controller support for the Flatpak release</p>

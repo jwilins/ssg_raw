@@ -4,7 +4,7 @@ local LIBVORBIS = sourcepath(tup.getcwd() .. "/libvorbis/")
 ---Builds the submodules for the Xiph audio codecs.
 ---@param base_cfg Config
 function BuildXiph(base_cfg)
-	---@class ConfigShape
+	---@type ConfigShape
 	local link = { cflags = string.format(
 		"-I%sinclude -I%sinclude", LIBOGG.root, LIBVORBIS.root
 	) }
@@ -17,7 +17,8 @@ function BuildXiph(base_cfg)
 	})
 
 	link.linputs = (
-		cc(libogg_cfg, libogg_src) + cc(libvorbis_cfg, libvorbis_src)
+		libogg_cfg:lib(libogg_cfg:cc(libogg_src), "libogg") +
+		libogg_cfg:lib(libvorbis_cfg:cc(libvorbis_src), "libvorbis")
 	)
 	return link
 end

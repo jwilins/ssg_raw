@@ -6,6 +6,7 @@
 #ifndef PBGWIN_WINDOWSYS_H
 #define PBGWIN_WINDOWSYS_H		"WINDOWSYS : Version 0.24 : Update 2000/02/28"
 
+#include "game/enum_flags.h"
 #include "game/input.h"
 #include "game/text.h"
 
@@ -26,6 +27,9 @@
 
 
 
+// Constants
+// ---------
+
 // 最大数に関する定数 //
 #define WINITEM_MAX		20			// 項目の最大数
 #define WINDOW_DEPTH	10			// ウィンドウの深さ
@@ -39,6 +43,15 @@
 #define CWIN_NEXT		0x04		// 次のウィンドウに移行中
 #define CWIN_BEFORE		0x05		// 前のウィンドウに移行中
 #define CWIN_INIT		0xff		// 初期化処理中
+
+constexpr auto CWIN_FONT = FONT_ID::SMALL;
+
+constexpr PIXEL_COORD CWIN_ITEM_LEFT = 8;
+constexpr PIXEL_COORD CWIN_ITEM_H = 16;
+constexpr PIXEL_COORD CWIN_MAX_H = ((WINITEM_MAX + 1) * CWIN_ITEM_H);
+
+constexpr PIXEL_COORD FACE_W = 96;
+constexpr PIXEL_COORD FACE_H = 96;
 
 // メッセージウィンドウ・コマンド //
 #define MWCMD_SMALLFONT		0x00		// スモールフォントを使用する
@@ -61,17 +74,11 @@
 
 // その他の定数 //
 #define CWIN_KEYWAIT	8
+// ---------
 
 
 
 ///// [構造体] /////
-
-enum class WINDOW_STATE : uint8_t {
-	REGULAR = 0,
-	HIGHLIGHT = 1,
-	DISABLED = 2,
-	COUNT,
-};
 
 enum class WINDOW_FLAGS : uint8_t {
 	_HAS_BITFLAG_OPERATORS,
@@ -82,6 +89,14 @@ enum class WINDOW_FLAGS : uint8_t {
 
 	// Horizontally centered text.
 	CENTER = 0x02,
+
+	// Cannot be selected.
+	DISABLED = 0x04,
+
+	// Rendered in the highlight color.
+	HIGHLIGHT = 0x08,
+
+	FORCE_RERENDER = 0x10,
 };
 
 struct WINDOW_MENU;
@@ -91,10 +106,9 @@ struct WINDOW_LABEL {
 	Narrow::literal	Title;	// タイトル文字列へのポインタ(実体ではない！)
 
 	WINDOW_FLAGS	Flags = WINDOW_FLAGS::NONE;
-	WINDOW_STATE	State = WINDOW_STATE::REGULAR;
 
-	// Required for forcing the item to be re-rendered after a state change.
-	WINDOW_STATE	StatePrev = WINDOW_STATE::COUNT;
+	// Required for forcing the item to be re-rendered after a flag change.
+	WINDOW_FLAGS	FlagsPrev = WINDOW_FLAGS::FORCE_RERENDER;
 
 	constexpr WINDOW_LABEL(
 		const Narrow::literal title = "",
@@ -125,7 +139,7 @@ struct WINDOW_CHOICE : public WINDOW_LABEL {
 		WINDOW_LABEL(title, flags), Help(help), CallBackFn(callback_fn)
 	{
 		if(!callback_fn) {
-			State = WINDOW_STATE::DISABLED;
+			Flags |= WINDOW_FLAGS::DISABLED;
 		}
 	}
 
@@ -166,7 +180,6 @@ struct WINDOW_MENU {
 	WINDOW_CHOICE*	ItemPtr[WINITEM_MAX] = { nullptr };	// 次の項目へのポインタ
 	void	(*SetItems)(bool tick) = [](bool) {};
 	uint8_t	NumItems;	// 項目数(<ITEM_MAX)
-	uint8_t	Clock;
 
 	template <size_t N> constexpr WINDOW_MENU(
 		std::span<WINDOW_CHOICE, N> children,
@@ -310,27 +323,8 @@ void CWinMove(WINDOW_SYSTEM *ws);				// コマンドウィンドウを１フレ�
 void CWinDraw(WINDOW_SYSTEM *ws);				// コマンドウィンドウの描画
 bool CWinExitFn(INPUT_BITS key);	// コマンド [Exit] のデフォルト処理関数
 
-// Returns whether this key represents an "OK" action.
-constexpr bool CWinOKKey(INPUT_BITS key)
-{
-	return ((key == KEY_RETURN) || (key == KEY_TAMA));
-}
-
-// Returns whether this key represents a "Cancel" action.
-constexpr bool CWinCancelKey(INPUT_BITS key)
-{
-	return ((key == KEY_BOMB) || (key == KEY_ESC));
-}
-
-// Returns the delta that this key would apply to a numeric option value.
-constexpr int_fast8_t CWinOptionKeyDelta(INPUT_BITS key)
-{
-	return (
-		(CWinOKKey(key) || (key == KEY_RIGHT)) ? 1 :
-		(key == KEY_LEFT) ? -1 :
-		0
-	);
-}
+// アクティブなウィンドウを探す
+WINDOW_MENU *CWinSearchActive(WINDOW_SYSTEM *ws);
 
 // Calculates the rendered width of the given text in the menu item font,
 // without any padding.

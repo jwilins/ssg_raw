@@ -16,7 +16,7 @@ bool	DemoplaySaveEnable = false;	// デモプレイのセーブが動作して�
 bool	DemoplayLoadEnable = false;	// デモプレイのロードが動作しているか
 DEMOPLAY_INFO	DemoInfo;						// デモプレイ情報
 INPUT_BITS	DemoBuffer[DEMOBUF_MAX];	// デモプレイ用バッファ
-size_t	DemoBufPtr;	// デモプレイ用バッファPtr(Ｃのそれではない)
+static uint32_t DemoFrameCur;
 struct {
 	uint8_t PlayerStock;
 	uint8_t BombStock;
@@ -24,15 +24,6 @@ struct {
 } ConfigTemp; // コンフィグのデータ一時保存用
 
 //DWORD RndBuf[RNDBUF_MAX];
-
-void DEMOPLAY_CONFIG_DATA::operator=(const CONFIG_DATA& config)
-{
-	GameLevel = config.GameLevel.v;
-	PlayerStock = config.PlayerStock.v;
-	BombStock = config.BombStock.v;
-	InputFlags = config.InputFlags.v;
-}
-
 
 
 PATH_STRING ReplayFN(uint8_t stage)
@@ -56,16 +47,19 @@ void DemoplayInit(void)
 
 	DemoInfo.Exp    = Viv.exp;
 	DemoInfo.Weapon = Viv.weapon;
-	DemoInfo.CfgDat = ConfigDat;
+	DemoInfo.CfgDat.GameLevel = GameLevel;
+	DemoInfo.CfgDat.PlayerStock = Viv.left;
+	DemoInfo.CfgDat.BombStock = ConfigDat.BombStock.v;
+	DemoInfo.CfgDat.InputFlags = ConfigDat.InputFlags.v;
 
-	DemoBufPtr         = 0;
+	DemoFrameCur = 0;
 	DemoplaySaveEnable = true;
 }
 
 
 bool DemoplayLoadSetup()
 {
-	DemoBufPtr = 0;
+	DemoFrameCur = 0;
 	DemoplayLoadEnable = true;
 
 	// コンフィグの初期化 //
@@ -100,11 +94,11 @@ bool DemoplayRecord(INPUT_BITS key)
 		return false;
 	}
 
-	DemoBuffer[DemoBufPtr++] = key;
+	DemoBuffer[DemoFrameCur++] = key;
 
 	// バッファが最後に来たか、ＥＳＣが押された場合 //
-	if(DemoBufPtr==DEMOBUF_MAX || (key&KEY_ESC)){
-		DemoBufPtr--;
+	if((DemoFrameCur == DEMOBUF_MAX) || (key & KEY_ESC)) {
+		DemoFrameCur--;
 		return true;
 	}
 	return false;
@@ -115,14 +109,14 @@ void DemoplaySaveDemo(void)
 {
 	if(!DemoplaySaveEnable) return;
 
-	DemoBuffer[DemoBufPtr] = KEY_ESC;
-	DemoInfo.DataSize = DemoBufPtr+1;
+	DemoBuffer[DemoFrameCur] = KEY_ESC;
+	DemoInfo.FrameCount = (DemoFrameCur + 1);
 
 	PATH_CODEUNIT fn[] = _PATH("STG_Demo.DAT");
 	fn[3] = ('0' + GameStage);
 
 	const std::array<BYTE_BUFFER_BORROWED, 2> bufs = {
-		std::span(&DemoInfo, 1), std::span(DemoBuffer, (DemoBufPtr + 1)),
+		std::span(&DemoInfo, 1), std::span(DemoBuffer, DemoInfo.FrameCount),
 	};
 	FileWrite(fn, std::span<const BYTE_BUFFER_BORROWED>{ bufs });
 
@@ -143,7 +137,7 @@ bool DemoplayLoadDemo(int stage)
 		DemoInfo = maybe_info.value()[0];
 	}
 	{
-		const auto maybe_inputs = temp_cursor.next<uint16_t>(DemoInfo.DataSize);
+		const auto maybe_inputs = temp_cursor.next<uint16_t>(DemoInfo.FrameCount);
 		if(!maybe_inputs) {
 			return false;
 		}
@@ -158,11 +152,11 @@ INPUT_BITS DemoplayMove(void)
 {
 	if(!DemoplayLoadEnable) return KEY_ESC;
 
-	const auto ptr = DemoBufPtr;
-	if(ptr>=DemoInfo.DataSize){
+	const auto ptr = DemoFrameCur;
+	if(ptr>=DemoInfo.FrameCount){
 		DemoplayLoadEnable = false;
 	}
-	else DemoBufPtr++;
+	else DemoFrameCur++;
 
 	return DemoBuffer[ptr];
 }
@@ -185,12 +179,11 @@ void DemoplaySaveReplay(void)
 	// すぐさま、無効化する //
 	DemoplaySaveEnable = false;
 
-	DemoBuffer[DemoBufPtr] = KEY_ESC;
-	DemoInfo.DataSize = DemoBufPtr+1;
+	DemoBuffer[DemoFrameCur] = KEY_ESC;
+	DemoInfo.FrameCount = (DemoFrameCur + 1);
 
-	const auto demo_size = (sizeof(INPUT_BITS) * DemoInfo.DataSize);
 	PACKFILE_WRITE out = { {
-		std::span(&DemoInfo, 1), std::span(DemoBuffer, demo_size),
+		std::span(&DemoInfo, 1), std::span(DemoBuffer, DemoInfo.FrameCount),
 	} };
 
 	const auto fn = ReplayFN(GameStage);
@@ -202,7 +195,7 @@ bool DemoplayLoadReplay(int stage)
 {
 	BYTE_BUFFER_OWNED	temp;
 
-	const auto fn = ReplayFN(GameStage);
+	const auto fn = ReplayFN(stage);
 	const auto in = FilStartR(fn.c_str());
 
 	// ヘッダの格納先は０番である //
@@ -217,6 +210,44 @@ bool DemoplayLoadReplay(int stage)
 	if(NULL == temp){
 		return false;
 	}
-	memcpy(DemoBuffer, temp.get(), (sizeof(INPUT_BITS) * DemoInfo.DataSize));
+	memcpy(DemoBuffer, temp.get(), (sizeof(INPUT_BITS) * DemoInfo.FrameCount));
+
+	// Repair any replay-related bugs from earlier builds
+	// --------------------------------------------------
+
+	bool repair = false;
+	const auto file_level = DemoInfo.CfgDat.GameLevel;
+	const auto file_lives = DemoInfo.CfgDat.PlayerStock;
+	
+	// ≥P0295 was writing the configured difficulty and starting lives for the
+	// regular 6 stages instead of the fixed values for the Extra Stage.
+	// MODDERS: If this bug doesn't apply to you because you modded an earlier
+	// build, mark the affected files as read-only to skip this patch.
+	if(
+		(stage == GRAPH_ID_EXSTAGE) &&
+		((file_level != EXTRA_LEVEL) || (file_lives != EXTRA_LIVES))
+	) {
+		DemoInfo.CfgDat.GameLevel = EXTRA_LEVEL;
+		DemoInfo.CfgDat.PlayerStock = EXTRA_LIVES;
+		repair = true;
+	}
+
+	// ≥P0217 was writing twice as many frames as recorded.
+	if(temp.size() != (sizeof(INPUT_BITS) * DemoInfo.FrameCount)) {
+		repair = true;
+	}
+
+	if(repair) {
+		PACKFILE_WRITE out = { {
+			std::span(&DemoInfo, 1),
+			std::span(DemoBuffer, DemoInfo.FrameCount),
+		} };
+		if(!out.Write(fn.c_str(), FILE_FLAGS::PRESERVE_TIMESTAMPS)) {
+			// Repair denied by file being read-only? OK, bro, you're the boss!
+			DemoInfo.CfgDat.GameLevel = file_level;
+			DemoInfo.CfgDat.PlayerStock = file_lives;
+		}
+	}
+	// --------------------------------------------------
 	return DemoplayLoadSetup();
 }

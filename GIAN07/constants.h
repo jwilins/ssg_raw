@@ -71,9 +71,14 @@ static constexpr SURFACE_ID operator+(SURFACE_ID lhs, uint8_t rhs)
 }
 
 enum class FONT_ID : uint8_t {
+	// IDs referenced by original game data
 	SMALL = 0,	// フォント(小さい文字用)
 	NORMAL = 1,	// フォント(通常の文字用)
 	LARGE = 2,	// フォント(大きい文字用)
+
+	// Newly added in this fork
+	TINY = 3,
+
 	COUNT,
 };
 // --------
@@ -99,3 +104,18 @@ constexpr int SND_X_MID = PixelToWorld(320);
 
 constexpr int SND_X_PER_DECIBEL = PixelToWorld(25);
 // -----------------------------------------------------------
+
+// OpenGL is either *the* best or close to the best choice everywhere when it
+// comes to performance (at least on SDL 2, which doesn't batch draw calls by
+// default):
+//
+// 	https://rec98.nmlgc.net/blog/2024-10-22#benchmark-2024-10-22
+//
+// Yes, this means that SDL 2 users have to manually pick any of the Direct3D
+// APIs to get accurate line drawing, but great performance on everything out
+// of the box is more important.
+#ifdef SDL3
+constexpr const char8_t *GRP_SDL_DEFAULT_API = nullptr;
+#else
+constexpr const char8_t *GRP_SDL_DEFAULT_API = u8"opengl";
+#endif

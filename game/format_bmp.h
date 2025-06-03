@@ -8,6 +8,7 @@
 #include "platform/file.h"
 #include "game/coords.h"
 #include "game/endian.h"
+#include "game/pixelformat.h"
 
 // Platform-independent .BMP header types
 // --------------------------------------
@@ -44,14 +45,6 @@ struct BMP_INFOHEADER {
 	}
 };
 
-// Same as the standard Win32 RGBQUAD structure, renamed to avoid collisions.
-struct BGRA {
-	uint8_t b;
-	uint8_t g;
-	uint8_t r;
-	uint8_t a;
-};
-
 #pragma pack(pop)
 // --------------------------------------
 
@@ -71,6 +64,9 @@ constexpr uint16_t BMP_PALETTE_SIZE_MAX = 256;
 constexpr uint16_t BMPPaletteSizeFromBPP(uint8_t bpp);
 
 std::optional<BMP_OWNED> BMPLoad(BYTE_BUFFER_OWNED buffer);
+
+// Returns `true` if BMPSave() supports the given [format].
+bool BMPSaveSupports(PIXELFORMAT format);
 
 bool BMPSave(
 	FILE_STREAM_WRITE* stream,

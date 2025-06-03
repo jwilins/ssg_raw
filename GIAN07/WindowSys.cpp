@@ -12,19 +12,6 @@
 #include "game/ut_math.h"
 
 
-// Constants
-// ---------
-
-constexpr auto CWIN_FONT = FONT_ID::SMALL;
-
-constexpr PIXEL_COORD CWIN_ITEM_LEFT = 8;
-constexpr PIXEL_COORD CWIN_ITEM_H = 16;
-constexpr PIXEL_COORD CWIN_MAX_H = ((WINITEM_MAX + 1) * CWIN_ITEM_H);
-
-constexpr PIXEL_COORD FACE_W = 96;
-constexpr PIXEL_COORD FACE_H = 96;
-// ---------
-
 ///// [構造体] /////
 
 // メッセージウィンドウ管理用構造体 //
@@ -66,7 +53,6 @@ typedef struct tagMSG_WINDOW{
 
 ///// [非公開関数] /////
 
-static WINDOW_MENU *CWinSearchActive(WINDOW_SYSTEM *ws);	// アクティブなウィンドウを探す
 static void CWinKeyEvent(WINDOW_SYSTEM *ws);				// キーボード入力を処理する
 
 static void DrawWindowFrame(int x,int y,int w,int h);		// ウィンドウ枠を描画する
@@ -93,7 +79,7 @@ uint8_t WINDOW_MENU::MaxItems() const
 
 void WINDOW_CHOICE::SetActive(bool active)
 {
-	State = (active ? WINDOW_STATE::REGULAR : WINDOW_STATE::DISABLED);
+	EnumFlagSet(Flags, WINDOW_FLAGS::DISABLED, !active);
 }
 
 void WINDOW_SYSTEM::Init(PIXEL_COORD w)
@@ -168,19 +154,42 @@ void CWinMove(WINDOW_SYSTEM *ws)
 	ws->Count++;
 }
 
-// コマンドウィンドウの描画 //
-void CWinDraw(WINDOW_SYSTEM *ws)
+void CWinDrawLabel(
+	TEXTRENDER_SESSION& s, const WINDOW_LABEL& label, bool is_title
+)
 {
 	struct COLOR_PAIR {
 		RGB shadow;
 		RGB text;
 	};
 
-	static constexpr ENUMARRAY<COLOR_PAIR, WINDOW_STATE> COL = {{
-		COLOR_PAIR{ { 128, 128, 128 }, { 255, 255, 255 } }, // Regular
-		COLOR_PAIR{ { 128, 128, 128 }, { 255, 255,  70 } }, // Highlight
-		COLOR_PAIR{ {  96,  96,  96 }, { 192, 192, 192 } }, // Disabled
-	}};
+	static constexpr COLOR_PAIR COL[2][2] = {
+		COLOR_PAIR{ { 128, 128, 128 }, { 255, 255, 255 } }, // Active, regular
+		COLOR_PAIR{ { 128, 128, 128 }, { 255, 255,  70 } }, // Active, HL
+		COLOR_PAIR{ {  96,  96,  96 }, { 192, 192, 192 } }, // Disabled, regular
+		COLOR_PAIR{ {  96,  96,  96 }, { 192, 192,  70 } }, // Disabled, HL
+	};
+
+	const auto disabled = !!(label.Flags & WINDOW_FLAGS::DISABLED);
+	const auto highlight = !!(label.Flags & WINDOW_FLAGS::HIGHLIGHT);
+	const auto& col = COL[disabled][highlight];
+	s.SetFont(CWIN_FONT);
+
+	// Adding CWIN_ITEM_LEFT to centered text would throw it off-center,
+	// obviously. Also, non-centered titles that don't start with spaces
+	// shouldn't be dedented relative to the menu items.
+	const auto starts_with_space = (label.Title.ptr && (*label.Title.ptr == ' '));
+	const auto left = (!!(label.Flags & WINDOW_FLAGS::CENTER)
+		? TextLayoutXCenter(s, label.Title)
+		: ((is_title && starts_with_space) ? 0 : CWIN_ITEM_LEFT)
+	);
+	s.Put({ (left + 1), 0 }, label.Title, col.shadow);
+	s.Put({ (left + 0), 0 }, label.Title, col.text);
+}
+
+// コマンドウィンドウの描画 //
+void CWinDraw(WINDOW_SYSTEM *ws)
+{
 	int				i;
 	WINDOW_COORD	top = ws->y;
 
@@ -216,43 +225,22 @@ void CWinDraw(WINDOW_SYSTEM *ws)
 	WINDOW_POINT topleft = { ws->x, ws->y };
 	const auto trr = ws->TRRs[0];
 	const Narrow::string_view str = p->Title->Title;
-	TextObj.Render(topleft, trr, str, [=](TEXTRENDER_SESSION auto& s) {
-		const auto& col = COL[WINDOW_STATE::REGULAR];
-		s.SetFont(CWIN_FONT);
-
-		// Non-centered titles that don't start with spaces shouldn't be
-		// dedented relative to the menu items.
-		const auto left = (!!(p->Title->Flags & WINDOW_FLAGS::CENTER)
-			? TextLayoutXCenter(s, str)
-			: (str.starts_with(' ') ? 0 : CWIN_ITEM_LEFT)
-		);
-		s.Put({ (left + 1), 0 }, str, col.shadow);
-		s.Put({ (left + 0), 0 }, str, col.text);
+	TextObj.Render(topleft, trr, str, [=](TEXTRENDER_SESSION& s) {
+		CWinDrawLabel(s, *p->Title, true);
 	});
 	topleft.y += (CWIN_ITEM_H + 1); // ???
 
 	for(i = 0; i < p->NumItems; i++) {
 		const auto trr = ws->TRRs[1 + i];
 		auto* item = p->ItemPtr[i];
-		const Narrow::string_view str = item->Title;
-		const Narrow::string_view c = ((item->State == item->StatePrev)
-			? str
+		const Narrow::string_view c = ((item->Flags == item->FlagsPrev)
+			? item->Title
 			: ""
 		);
-		TextObj.Render(topleft, trr, c, [=](TEXTRENDER_SESSION auto& s) {
-			const auto& col = COL[item->State];
-			s.SetFont(CWIN_FONT);
-
-			// Adding CWIN_ITEM_LEFT to centered text would throw it off-center,
-			// obviously.
-			const auto left = (!!(item->Flags & WINDOW_FLAGS::CENTER)
-				? TextLayoutXCenter(s, str)
-				: CWIN_ITEM_LEFT
-			);
-			s.Put({ (left + 1), 0 }, str, col.shadow);
-			s.Put({ (left + 0), 0 }, str, col.text);
+		TextObj.Render(topleft, trr, c, [=](TEXTRENDER_SESSION& s) {
+			CWinDrawLabel(s, *item, false);
 		});
-		item->StatePrev = item->State;
+		item->FlagsPrev = item->Flags;
 		topleft.y += CWIN_ITEM_H;
 	}
 }
@@ -260,7 +248,7 @@ void CWinDraw(WINDOW_SYSTEM *ws)
 // コマンド [Exit] のデフォルト処理関数 //
 bool CWinExitFn(INPUT_BITS key)
 {
-	if(CWinOKKey(key) || CWinCancelKey(key)) {
+	if(Input_IsOK(key) || Input_IsCancel(key)) {
 		return false;
 	}
 	return true;
@@ -414,7 +402,7 @@ void MWinDraw(void)
 		const auto topleft = (WINDOW_POINT{ x, y } + MsgWindow.TextTopleft);
 		const auto trr = MsgWindow.TRR.value();
 		const auto& text = MsgWindow.Text;
-		TextObj.Render(topleft, trr, text, [](TEXTRENDER_SESSION auto& s) {
+		TextObj.Render(topleft, trr, text, [](TEXTRENDER_SESSION& s) {
 			// セットされたフォントで描画
 			s.SetFont(MsgWindow.FontID);
 			for(auto i = 0; i < MsgWindow.Line; i++) {
@@ -610,7 +598,7 @@ void MWinHelp(WINDOW_SYSTEM *ws)
 }
 
 // アクティブなウィンドウを探す //
-static WINDOW_MENU *CWinSearchActive(WINDOW_SYSTEM *ws)
+WINDOW_MENU *CWinSearchActive(WINDOW_SYSTEM *ws)
 {
 	int				i;
 
@@ -626,9 +614,6 @@ static WINDOW_MENU *CWinSearchActive(WINDOW_SYSTEM *ws)
 // キーボード入力を処理する //
 static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 {
-	using STATE = WINDOW_STATE;
-	using FLAGS = WINDOW_FLAGS;
-
 	if(ws->FirstWait){
 		if(Key_Data) {
 			return;
@@ -649,7 +634,7 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 	auto Depth = ws->SelectDepth;
 
 	// In case the item just disabled itself...
-	while(p->ItemPtr[ws->Select[Depth]]->State == STATE::DISABLED) {
+	while(!!(p->ItemPtr[ws->Select[Depth]]->Flags & WINDOW_FLAGS::DISABLED)) {
 		ws->Select[Depth] = ((ws->Select[Depth] + 1) % p->NumItems);
 	}
 
@@ -664,7 +649,8 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 		}
 		return;
 	} else if(
-		!!(p2->Flags & FLAGS::FAST_REPEAT) && CWinOptionKeyDelta(ws->OldKey)
+		!!(p2->Flags & WINDOW_FLAGS::FAST_REPEAT) &&
+		Input_OptionKeyDelta(ws->OldKey)
 	) {
 		ws->KeyCount = ws->FastRepeatWait;
 		ws->FastRepeatWait = (std::max)((ws->FastRepeatWait - 2), 0);
@@ -678,7 +664,7 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 	) {
 		ws->KeyCount = CWIN_KEYWAIT;
 		return;
-	} else if(CWinOKKey(ws->OldKey) || CWinCancelKey(ws->OldKey)) {
+	} else if(Input_IsOK(ws->OldKey) || Input_IsCancel(ws->OldKey)) {
 		// いかなる場合もリピートを許可しないキー //
 		if(Key_Data == ws->OldKey) {
 			return;
@@ -694,7 +680,7 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 	) {
 		do {
 			cur = ((cur + menu.NumItems + direction) % menu.NumItems);
-		} while(menu.ItemPtr[cur]->State == STATE::DISABLED);
+		} while(!!(menu.ItemPtr[cur]->Flags & WINDOW_FLAGS::DISABLED));
 		return cur;
 	};
 
@@ -714,11 +700,9 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 		const auto delta = ((Key_Data == KEY_UP) ? -1 : +1);
 		ws->Select[Depth] = next_active(*p, ws->Select[Depth], delta);
 		Snd_SEPlay(SOUND_ID_SELECT);
-	} else if(CWinCancelKey(Key_Data)) {
+	} else if(Input_IsCancel(Key_Data)) {
 		Snd_SEPlay(SOUND_ID_CANCEL);
-	} else if(
-		CWinOKKey(Key_Data) || (Key_Data == KEY_LEFT) || (Key_Data == KEY_RIGHT)
-	) {
+	} else if(Input_OptionKeyDelta(Key_Data)) {
 		Snd_SEPlay(SOUND_ID_SELECT);
 	} else if(Key_Data == 0) {
 		ws->FastRepeatWait = CWIN_KEYWAIT;
@@ -728,20 +712,24 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 		// コールバック動作時の処理 //
 		const auto ret = ([p, p2] {
 			if(p2->OptionFn) {
-				if(CWinCancelKey(Key_Data)) {
+				if(Input_IsCancel(Key_Data)) {
 					return false;
-				} else if(const auto delta = CWinOptionKeyDelta(Key_Data)) {
+				} else if(const auto delta = Input_OptionKeyDelta(Key_Data)) {
 					p2->OptionFn(delta);
 				}
 				p->SetItems(true);
 				return true;
 			}
 
+			// The item text may need to change while the cursor is on a
+			// non-option item...
+			p->SetItems(false);
+
 			return p2->CallBackFn(Key_Data);
 		})();
 		if(ret == false) {
 			if(Depth==0){
-				if(!CWinCancelKey(Key_Data)) {
+				if(!Input_IsCancel(Key_Data)) {
 					// 後で (CWIN_CLOSE) に変更すること//
 					ws->State  = CWIN_DEAD;
 					ws->OldKey = 0;			// ここは結構重要
@@ -757,7 +745,7 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 		p->SetItems(false);
 
 		// デフォルトのキーボード動作 //
-		if(CWinOKKey(Key_Data)) {
+		if(Input_IsOK(Key_Data)) {
 			// 決定・選択
 			if(p2->Submenu && (p2->Submenu->NumItems != 0)) {
 				p2->Submenu->Title = p2;
@@ -769,7 +757,7 @@ static void CWinKeyEvent(WINDOW_SYSTEM *ws)
 				ws->Select[Depth + 1] = next_active(*p2->Submenu, -1, +1);
 				ws->SelectDepth++;
 			}
-		} else if(CWinCancelKey(Key_Data)) {
+		} else if(Input_IsCancel(Key_Data)) {
 			// キャンセル
 			move_to_previous_level(*ws);
 		}

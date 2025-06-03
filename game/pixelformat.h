@@ -7,22 +7,70 @@
 
 import std.compat;
 
-// (We don't really care about the value of whatever variant type this holds,
-// just about the type itself.)
-struct PIXELFORMAT : public std::variant<uint8_t, uint16_t, uint32_t> {
-	// Not worth auto-generating at all.
-	using LARGEST = uint32_t;
+// Same as the standard Win32 PALETTEENTRY structure.
+struct RGBA {
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+	uint8_t a;
+
+	constexpr bool operator==(const RGBA& other) const = default;
+};
+static_assert(sizeof(RGBA) == 4);
+
+// Same as the standard Win32 RGBQUAD structure.
+struct BGRA {
+	uint8_t b;
+	uint8_t g;
+	uint8_t r;
+	uint8_t a;
+
+	constexpr bool operator==(const BGRA& other) const = default;
+};
+static_assert(sizeof(BGRA) == 4);
+
+struct PIXELFORMAT {
+	// All specific formats are in memory byte order. The alpha channel must
+	// always be valid for formats with an `A` (i.e., 0xFF everywhere for fully
+	// opaque images like render backbuffers or the like), and always be
+	// ignored for formats with a `X`.
+	enum FORMAT {
+		PALETTE8,
+		RGB565_LE16,   // GGGBBBBB RRRRRGGG
+		ARGB1555_LE16, // GGGBBBBB ARRRRRGG
+		BGRX8888,
+		BGRA8888,
+		RGBA8888,
+	} format;
+
+	enum SIZE {
+		SIZE8 = 1,
+		SIZE16 = 2,
+		SIZE32 = 4,
+	};
 
 	bool IsPalettized() const {
-		return std::holds_alternative<uint8_t>(*this);
+		return (format == PALETTE8);
 	}
 
 	bool IsChanneled() const {
 		return !IsPalettized();
 	}
 
-	std::strong_ordering operator <=>(const PIXELFORMAT& other) const {
-		return (index() <=> other.index());
+	SIZE PixelSize() const {
+		switch(format) {
+		case PALETTE8:      return SIZE8;
+		case RGB565_LE16:
+		case ARGB1555_LE16: return SIZE16;
+		case BGRX8888:
+		case BGRA8888:
+		case RGBA8888:      return SIZE32;
+		}
+		std::unreachable();
+	}
+
+	size_t PixelByteSize() const {
+		return static_cast<size_t>(PixelSize());
 	}
 };
 
@@ -65,17 +113,6 @@ public:
 
 		uint8_t value() const {
 			return bpp;
-		}
-
-		// Adding std::monostate to PIXELFORMAT would just make it awful to
-		// use.
-		std::optional<PIXELFORMAT> pixel_format() const {
-			switch(bpp) {
-			case  8:	return std::make_optional<PIXELFORMAT>(uint8_t{});
-			case 16:	return std::make_optional<PIXELFORMAT>(uint16_t{});
-			case 32:	return std::make_optional<PIXELFORMAT>(uint32_t{});
-			default:	return std::nullopt;
-			}
 		}
 
 		// Cycles through all supported bit depths.

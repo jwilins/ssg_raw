@@ -9,55 +9,62 @@
 #include "platform/text_backend.h"
 
 #ifdef WIN32
-	#include <windows.h>
+#include <windows.h>
 
-	extern constinit const ENUMARRAY<LOGFONTW, FONT_ID> FontSpecs = [] {
-		ENUMARRAY<LOGFONTW, FONT_ID> ret;
+extern constinit const ENUMARRAY<LOGFONTW, FONT_ID> FontSpecs = [] {
+	ENUMARRAY<LOGFONTW, FONT_ID> ret;
 
-		LOGFONTW logfont = {
-			.lfEscapement = 0,
-			.lfOrientation = 0,
-			.lfItalic = false,
-			.lfUnderline = false,
-			.lfStrikeOut = false,
-			.lfCharSet = SHIFTJIS_CHARSET,
-			.lfOutPrecision = OUT_TT_ONLY_PRECIS,
-			.lfClipPrecision = CLIP_DEFAULT_PRECIS,
-			.lfQuality = PROOF_QUALITY,
-			.lfPitchAndFamily = FIXED_PITCH,
-			.lfFaceName = L"ＭＳ ゴシック"
-		};
-
-		// ちっこいフォント //
-		logfont.lfHeight = 14;
-		logfont.lfWidth = 7;
-		logfont.lfWeight = FW_NORMAL;
-		ret[FONT_ID::SMALL] = logfont;
-
-		// 並なフォント //
-		logfont.lfHeight = 16;
-		logfont.lfWidth = 8;
-		logfont.lfWeight = FW_NORMAL;
-		ret[FONT_ID::NORMAL] = logfont;
-
-		// でかいフォント //
-		logfont.lfHeight = 24;
-		logfont.lfWidth = 12;
-		logfont.lfWeight = FW_MEDIUM;
-		ret[FONT_ID::LARGE] = logfont;
-
-		return ret;
-	}();
-#elif defined(LINUX)
-	#define GOTHIC "MS Gothic,IPAMonaGothic "
-
-	extern constinit const ENUMARRAY<const char *, FONT_ID> FontSpecs = {
-		(GOTHIC "Regular 14px"),
-		(GOTHIC "Regular 16px"),
-		(GOTHIC "Medium 24px"),
+	LOGFONTW logfont = {
+		.lfEscapement = 0,
+		.lfOrientation = 0,
+		.lfItalic = false,
+		.lfUnderline = false,
+		.lfStrikeOut = false,
+		.lfCharSet = SHIFTJIS_CHARSET,
+		.lfOutPrecision = OUT_TT_ONLY_PRECIS,
+		.lfClipPrecision = CLIP_DEFAULT_PRECIS,
+		.lfQuality = PROOF_QUALITY,
+		.lfPitchAndFamily = FIXED_PITCH,
+		.lfFaceName = L"ＭＳ ゴシック"
 	};
 
-	#undef GOTHIC
+	// ちっこいフォント //
+	logfont.lfHeight = 14;
+	logfont.lfWidth = 7;
+	logfont.lfWeight = FW_NORMAL;
+	ret[FONT_ID::SMALL] = logfont;
+
+	// 並なフォント //
+	logfont.lfHeight = 16;
+	logfont.lfWidth = 8;
+	logfont.lfWeight = FW_NORMAL;
+	ret[FONT_ID::NORMAL] = logfont;
+
+	// でかいフォント //
+	logfont.lfHeight = 24;
+	logfont.lfWidth = 12;
+	logfont.lfWeight = FW_MEDIUM;
+	ret[FONT_ID::LARGE] = logfont;
+
+	// Tiny //
+	logfont.lfHeight = 10;
+	logfont.lfWidth = 0;
+	logfont.lfWeight = FW_NORMAL;
+	ret[FONT_ID::TINY] = logfont;
+
+	return ret;
+}();
+#elif defined(LINUX)
+#define GOTHIC "MS Gothic,IPAMonaGothic "
+
+extern constinit const ENUMARRAY<const char *, FONT_ID> FontSpecs = {
+	(GOTHIC "Regular 14px"),
+	(GOTHIC "Regular 16px"),
+	(GOTHIC "Medium 24px"),
+	(GOTHIC "Regular 10px"),
+};
+
+#undef GOTHIC
 #endif
 
 // Glyph selection inside the 16×16 font //
@@ -210,6 +217,19 @@ extern void GrpPutScore(int x, int y, const char *s)
 	}
 }
 
+void GrpPut55(WINDOW_POINT topleft, const std::string_view s)
+{
+	for(const char c : s) {
+		const auto w = GrpExtent5(c);
+		if(w == 0) {
+			continue;
+		}
+		const auto src = PIXEL_LTWH{ (((c - 'A') << 3) + 128), 99, w, 5 };
+		GrpSurface_Blit(topleft, SURFACE_ID::SYSTEM, src);
+		topleft.x += (w + 1);
+	}
+}
+
 // MIDI 用フォントを描画する //
 extern void GrpPutMidNum(int x, int y, int n)
 {
@@ -233,47 +253,49 @@ extern void GrpPutMidNum(int x, int y, int n)
 }
 
 PIXEL_SIZE DrawGrdFont(
-	TEXTRENDER_RECT_ID rect_id, std::span<const Narrow::string_view> strs
+	TEXTRENDER_SESSION& s,
+	std::span<const Narrow::string_view> strs,
+	FONT_ID font,
+	bool shadow,
+	uint8_t (*gradient_func)(PIXEL_COORD y)
 )
 {
 	PIXEL_SIZE extent = { 0, 0 };
-	TextObj.Prerender(rect_id, [&](TEXTRENDER_SESSION auto& s) {
-		// ここら辺は、一種の常套手段か？ //
-		const auto temp = s.PixelAccess([](
-			TEXTRENDER_SESSION_PIXELACCESS auto& p
-		) {
-			const PIXEL_POINT coord = { 0, 0 };
-			const auto old = p.GetRaw(coord);
-			p.Set(coord, RGB{ 255, 255, 255 });
-			const auto temp = p.GetRaw(coord);
-			p.SetRaw(coord, old);
-			return temp;
-		});
+	
+	// ここら辺は、一種の常套手段か？ //
+	const auto temp = s.PixelAccess([](TEXTRENDER_SESSION::PIXELACCESS& p) {
+		const PIXEL_POINT coord = { 0, 0 };
+		const auto old = p.GetRaw(coord);
+		p.Set(coord, RGB{ 255, 255, 255 });
+		const auto temp = p.GetRaw(coord);
+		p.SetRaw(coord, old);
+		return temp;
+	});
 
-		s.SetFont(FONT_ID::NORMAL);
-		for(const auto& str : strs) {
+	s.SetFont(font);
+	for(const auto& str : strs) {
+		if(shadow) {
 			s.Put({ (extent.w + 2), 2 }, str, RGB{   0,   0, 128 });
 			s.Put({ (extent.w + 1), 2 }, str, RGB{   0,   0, 128 });
 			s.Put({ (extent.w + 1), 1 }, str, RGB{ 255, 255, 255 });
 			s.Put({ (extent.w + 0), 1 }, str, RGB{ 255, 255, 255 });
-			extent += s.Extent(str);
+		} else {
+			s.Put({ extent.w, 0 }, str, RGB{ 255, 255, 255 });
 		}
+		extent += s.Extent(str);
+	}
 
-		constexpr auto FSIZE = 8;
-		const PIXEL_COORD w = extent.w;
-		const PIXEL_COORD h = extent.h;
-
-		s.PixelAccess([&](TEXTRENDER_SESSION_PIXELACCESS auto& p) {
-			for(auto y = 1; y < h; y++) {
-				const uint8_t gradient = (255 + FSIZE - (y * FSIZE));
-				const RGB color = { gradient, gradient, 255 };
-				for(auto x = 1; x < w; x++) {
-					if(p.GetRaw({ x, y }) == temp) { // RGB(255, 255, 255)
-						p.Set({ x, y }, color);
-					}
+	s.PixelAccess([&](TEXTRENDER_SESSION::PIXELACCESS& p) {
+		for(PIXEL_COORD y = shadow; y < extent.h; y++) {
+			const uint8_t gradient = gradient_func(y);
+			const RGB color = { gradient, gradient, 255 };
+			for(PIXEL_COORD x = shadow; x < extent.w; x++) {
+				if(p.GetRaw({ x, y }) == temp) { // RGB(255, 255, 255)
+					p.Set({ x, y }, color);
 				}
 			}
-		});
+		}
 	});
+
 	return extent;
 }
