@@ -14,7 +14,7 @@ Instructions for extracting assets so that they can be read by this build:
 6. Renaming is done; feel free to remove rename.bat
 7. The game is now ready to be played with the extracted assets! Download and launch the executable of choice in your Shuusou Gyoku directory: GIAN07.exe and SDL2.dll for the updated SDL graphics engine (better for newer systems) or just GIAN07DX.exe for the original DirectX graphics engine (better for older systems).
 
-Custom music can be added through BGM packs as the nmlgc build already supports.
+Custom music can be added through BGM packs as the ReC98 build already supports.
 
 ----
 

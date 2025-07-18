@@ -258,6 +258,7 @@ bool LoadSound();
 
 // Packfile cache //
 // -------------- //
+
 namespace DAT {
 	enum class PACK_ID : uint8_t {
 		ENEMY,
@@ -319,6 +320,13 @@ namespace DAT {
 				load_thread.Join();
 			}
 			return pack;
+		}
+
+		void AbortLoading(void)
+		{
+			if(load_thread.Joinable()) {
+				load_thread.Abort();
+			}
 		}
 	};
 	ENUMARRAY<PACK, PACK_ID> Packs;
@@ -441,7 +449,7 @@ namespace DAT_MISSING {
 	bool FnRecheck(INPUT_BITS key) {
 		if((key == KEY_BOMB) || (key == KEY_ESC)) {
 			return false;
-		} else if(CWinOptionKeyDelta(key) && DAT::Check()) {
+		} else if(Input_OptionKeyDelta(key) && DAT::Check()) {
 			FoundAll = true;
 			return false;
 		}
@@ -516,6 +524,14 @@ void LoaderInit(void)
 	}
 }
 
+void LoaderCleanup(void)
+{
+	// Cleanly shut down any loading threads that might not have joined yet
+	for(auto& pack : DAT::Packs) {
+		pack.AbortLoading();
+	}
+}
+
 
 
 // グローバル変数 //
@@ -584,8 +600,6 @@ bool LoadGraph(int stage)
 	}
 	// エンディング全画像ロード(パレット含む) //
 	if(stage==GRAPH_ID_ENDING){
-		const auto& in = DAT::Packfile(DAT::PACK_ID::GRAPH2);
-
 		if(!GrpBMPLoadP(0, SURFACE_ID::ENDING_CREDITS, true)) {
 			return false;
 		}
@@ -674,7 +688,7 @@ bool LoadFace(uint8_t FaceID, uint8_t FileNo)
 	if(FaceID >= FACE_MAX) {
 		return false;
 	}
-	//const auto& graph = DAT::Packfile(DAT::PACK_ID::GRAPH);
+	
 	if(!GrpBMPLoadP((13 + FileNo), (SURFACE_ID::FACE + FaceID))) {
 		return false;
 	}
@@ -703,8 +717,6 @@ bool LoadStageData(uint8_t stage)
 	ECL_Head = nullptr;
 	SCL_Head = nullptr;
 	ScrollInfo.DataHead = nullptr;
-
-	//const auto& enemy = DAT::Packfile(DAT::PACK_ID::ENEMY);
 
 	// エキストラステージシステム用 //
 	if(stage == GRAPH_ID_EXSTAGE){
@@ -1255,7 +1267,7 @@ bool LoadMIDIBuffer(BYTE_BUFFER_OWNED buf)
 }
 
 // 全てのSoundデータをロードする //
-bool LoadSound()
+bool LoadSound(void)
 {
 	// サウンドの初期化 //
 	// 何らかの理由で使用できなければ、Disable とする //
@@ -1296,18 +1308,13 @@ bool LoadSound()
 	return false;
 }
 
-// MusicRoom のコメントをロードする //
-bool LoadMusicRoomComment(int no)
+BYTE_BUFFER_OWNED LoadMusicRoomComment(int no)
 {
 	if((no < 0) || (no > 19)) {
 		return false;
 	}
-	if(!MusicRoomText) {
-		return false;
-	}
-	const auto& text = MusicRoomText.value();
 	std::u8string comment_file_path = GetFilePath(27 + no, u8"enemy\\", u8".MUS");
-	return text.PrerenderTitleAndComment(FileLoad(comment_file_path.c_str()), no);
+	return FileLoad(comment_file_path.c_str());
 }
 
 BYTE_BUFFER_OWNED LoadDemo(int stage)
